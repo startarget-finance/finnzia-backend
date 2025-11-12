@@ -38,5 +38,11 @@ public interface UsuarioRepository extends JpaRepository<Usuario, Long>, JpaSpec
      */
     @Query("SELECT u FROM Usuario u LEFT JOIN FETCH u.permissoes WHERE u.id = :id AND (u.deleted = false OR u.deleted IS NULL)")
     Optional<Usuario> findByIdWithPermissoes(@Param("id") Long id);
+
+    /**
+     * Busca usuário por token de reset de senha
+     */
+    @Query("SELECT u FROM Usuario u WHERE u.tokenResetSenha = :token AND (u.deleted = false OR u.deleted IS NULL)")
+    Optional<Usuario> findByTokenResetSenha(@Param("token") String token);
 }
 

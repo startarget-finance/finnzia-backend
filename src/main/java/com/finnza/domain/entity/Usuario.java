@@ -76,6 +76,12 @@ public class Usuario {
     @Builder.Default
     private Boolean deleted = false;
 
+    @Column(name = "token_reset_senha")
+    private String tokenResetSenha;
+
+    @Column(name = "token_reset_senha_expiracao")
+    private LocalDateTime tokenResetSenhaExpiracao;
+
     @OneToMany(mappedBy = "usuario", cascade = CascadeType.ALL, orphanRemoval = true, fetch = FetchType.EAGER)
     @Builder.Default
     private Set<Permissao> permissoes = new HashSet<>();

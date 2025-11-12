@@ -2,7 +2,9 @@ package com.finnza.service;
 
 import com.finnza.domain.entity.Permissao;
 import com.finnza.domain.entity.Usuario;
+import com.finnza.dto.request.AlterarSenhaRequest;
 import com.finnza.dto.request.AtualizarPermissoesRequest;
+import com.finnza.dto.request.AtualizarPerfilRequest;
 import com.finnza.dto.request.AtualizarUsuarioRequest;
 import com.finnza.dto.request.CriarUsuarioRequest;
 import com.finnza.dto.request.UsuarioFiltroRequest;
@@ -16,6 +18,8 @@ import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import org.springframework.data.jpa.domain.Specification;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -198,25 +202,48 @@ public class UsuarioService {
         Usuario usuario = usuarioRepository.findByIdWithPermissoes(id)
                 .orElseThrow(() -> new RuntimeException("Usuário não encontrado"));
 
-        // Remove permissões existentes
-        permissaoRepository.deleteByUsuario(usuario);
-        usuario.getPermissoes().clear();
-
-        // Cria novas permissões
+        // Mapa para rastrear permissões que devem existir
+        Map<Permissao.Modulo, Boolean> permissoesDesejadas = new java.util.HashMap<>();
         for (Map.Entry<String, Boolean> entry : request.getPermissions().entrySet()) {
-            try {
-                Permissao.Modulo modulo = converterChaveParaModulo(entry.getKey());
-                if (modulo != null) {
-                    Permissao permissao = Permissao.builder()
-                            .usuario(usuario)
-                            .modulo(modulo)
-                            .habilitado(entry.getValue())
-                            .build();
-                    usuario.adicionarPermissao(permissao);
-                }
-            } catch (IllegalArgumentException e) {
-                // Ignora módulos inválidos
-                continue;
+            Permissao.Modulo modulo = converterChaveParaModulo(entry.getKey());
+            if (modulo != null) {
+                permissoesDesejadas.put(modulo, entry.getValue());
+            }
+        }
+
+        // Mapa das permissões existentes por módulo
+        Map<Permissao.Modulo, Permissao> permissoesExistentes = new java.util.HashMap<>();
+        for (Permissao permissao : usuario.getPermissoes()) {
+            permissoesExistentes.put(permissao.getModulo(), permissao);
+        }
+
+        // Atualizar ou criar permissões
+        for (Map.Entry<Permissao.Modulo, Boolean> entry : permissoesDesejadas.entrySet()) {
+            Permissao.Modulo modulo = entry.getKey();
+            Boolean habilitado = entry.getValue();
+
+            if (permissoesExistentes.containsKey(modulo)) {
+                // Atualizar permissão existente
+                Permissao permissao = permissoesExistentes.get(modulo);
+                permissao.setHabilitado(habilitado);
+            } else {
+                // Criar nova permissão
+                Permissao permissao = Permissao.builder()
+                        .usuario(usuario)
+                        .modulo(modulo)
+                        .habilitado(habilitado)
+                        .build();
+                usuario.adicionarPermissao(permissao);
+            }
+        }
+
+        // Remover permissões que não estão mais na requisição
+        java.util.Iterator<Permissao> iterator = usuario.getPermissoes().iterator();
+        while (iterator.hasNext()) {
+            Permissao permissao = iterator.next();
+            if (!permissoesDesejadas.containsKey(permissao.getModulo())) {
+                iterator.remove();
+                permissaoRepository.delete(permissao);
             }
         }
 
@@ -263,6 +290,62 @@ public class UsuarioService {
                 .orElseThrow(() -> new RuntimeException("Usuário não encontrado"));
         
         usuarioRepository.delete(usuario);
+    }
+
+    /**
+     * Busca o perfil do usuário logado
+     */
+    @Transactional(readOnly = true)
+    public UsuarioDTO buscarMeuPerfil() {
+        String email = getEmailUsuarioLogado();
+        Usuario usuario = usuarioRepository.findByEmailWithPermissoes(email)
+                .orElseThrow(() -> new RuntimeException("Usuário não encontrado"));
+        return UsuarioDTO.fromEntity(usuario);
+    }
+
+    /**
+     * Atualiza o perfil do usuário logado
+     */
+    public UsuarioDTO atualizarMeuPerfil(AtualizarPerfilRequest request) {
+        String email = getEmailUsuarioLogado();
+        Usuario usuario = usuarioRepository.findByEmail(email)
+                .orElseThrow(() -> new RuntimeException("Usuário não encontrado"));
+
+        if (request.getNome() != null) {
+            usuario.setNome(request.getNome());
+        }
+
+        usuario = usuarioRepository.save(usuario);
+        return UsuarioDTO.fromEntity(usuario);
+    }
+
+    /**
+     * Altera a senha do usuário logado
+     */
+    public void alterarMinhaSenha(AlterarSenhaRequest request) {
+        String email = getEmailUsuarioLogado();
+        Usuario usuario = usuarioRepository.findByEmail(email)
+                .orElseThrow(() -> new RuntimeException("Usuário não encontrado"));
+
+        // Verificar senha atual
+        if (!passwordEncoder.matches(request.getSenhaAtual(), usuario.getSenha())) {
+            throw new RuntimeException("Senha atual incorreta");
+        }
+
+        // Atualizar senha
+        usuario.setSenha(passwordEncoder.encode(request.getNovaSenha()));
+        usuarioRepository.save(usuario);
+    }
+
+    /**
+     * Obtém o email do usuário logado
+     */
+    private String getEmailUsuarioLogado() {
+        Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
+        if (authentication == null || !authentication.isAuthenticated()) {
+            throw new RuntimeException("Usuário não autenticado");
+        }
+        return authentication.getName();
     }
 
     /**

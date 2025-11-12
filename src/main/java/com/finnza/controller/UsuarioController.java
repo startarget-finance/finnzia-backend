@@ -1,6 +1,8 @@
 package com.finnza.controller;
 
+import com.finnza.dto.request.AlterarSenhaRequest;
 import com.finnza.dto.request.AtualizarPermissoesRequest;
+import com.finnza.dto.request.AtualizarPerfilRequest;
 import com.finnza.dto.request.AtualizarUsuarioRequest;
 import com.finnza.dto.request.CriarUsuarioRequest;
 import com.finnza.dto.request.UsuarioFiltroRequest;
@@ -143,6 +145,33 @@ public class UsuarioController {
     public ResponseEntity<Void> removerPermanentemente(@PathVariable Long id) {
         usuarioService.removerPermanentemente(id);
         return ResponseEntity.noContent().build();
+    }
+
+    /**
+     * Busca o perfil do usuário logado
+     */
+    @GetMapping("/me")
+    public ResponseEntity<UsuarioDTO> buscarMeuPerfil() {
+        UsuarioDTO usuario = usuarioService.buscarMeuPerfil();
+        return ResponseEntity.ok(usuario);
+    }
+
+    /**
+     * Atualiza o perfil do usuário logado
+     */
+    @PutMapping("/me")
+    public ResponseEntity<UsuarioDTO> atualizarMeuPerfil(@Valid @RequestBody AtualizarPerfilRequest request) {
+        UsuarioDTO usuario = usuarioService.atualizarMeuPerfil(request);
+        return ResponseEntity.ok(usuario);
+    }
+
+    /**
+     * Altera a senha do usuário logado
+     */
+    @PutMapping("/me/senha")
+    public ResponseEntity<Void> alterarMinhaSenha(@Valid @RequestBody AlterarSenhaRequest request) {
+        usuarioService.alterarMinhaSenha(request);
+        return ResponseEntity.ok().build();
     }
 }
 

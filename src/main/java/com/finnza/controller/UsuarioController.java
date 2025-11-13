@@ -18,7 +18,6 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
-import java.util.List;
 
 /**
  * Controller para gerenciamento de usuários
@@ -52,19 +51,9 @@ public class UsuarioController {
     }
 
     /**
-     * Lista todos os usuários
+     * Lista usuários com paginação (obrigatório)
      */
     @GetMapping
-    @PreAuthorize("hasRole('ADMIN')")
-    public ResponseEntity<List<UsuarioDTO>> listarTodos() {
-        List<UsuarioDTO> usuarios = usuarioService.listarTodos();
-        return ResponseEntity.ok(usuarios);
-    }
-
-    /**
-     * Lista usuários com paginação
-     */
-    @GetMapping("/paginated")
     @PreAuthorize("hasRole('ADMIN')")
     public ResponseEntity<Page<UsuarioDTO>> listarTodos(
             @PageableDefault(size = 10, sort = "nome") Pageable pageable) {

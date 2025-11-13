@@ -25,7 +25,11 @@ import java.util.Set;
        },
        indexes = {
            @Index(name = "idx_usuario_email", columnList = "email"),
-           @Index(name = "idx_usuario_status", columnList = "status")
+           @Index(name = "idx_usuario_status", columnList = "status"),
+           @Index(name = "idx_usuario_deleted", columnList = "deleted"),
+           @Index(name = "idx_usuario_email_deleted", columnList = "email,deleted"),
+           @Index(name = "idx_usuario_status_deleted", columnList = "status,deleted"),
+           @Index(name = "idx_usuario_role_status", columnList = "role,status")
        })
 @EntityListeners(AuditingEntityListener.class)
 @Data
@@ -82,8 +86,9 @@ public class Usuario {
     @Column(name = "token_reset_senha_expiracao")
     private LocalDateTime tokenResetSenhaExpiracao;
 
-    @OneToMany(mappedBy = "usuario", cascade = CascadeType.ALL, orphanRemoval = true, fetch = FetchType.EAGER)
+    @OneToMany(mappedBy = "usuario", cascade = CascadeType.ALL, orphanRemoval = true, fetch = FetchType.LAZY)
     @Builder.Default
+    @org.hibernate.annotations.BatchSize(size = 20)
     private Set<Permissao> permissoes = new HashSet<>();
 
     /**

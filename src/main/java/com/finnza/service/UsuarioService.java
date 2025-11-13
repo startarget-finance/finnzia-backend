@@ -24,9 +24,7 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.util.List;
 import java.util.Map;
-import java.util.stream.Collectors;
 
 /**
  * Serviço para gerenciamento de usuários
@@ -115,52 +113,57 @@ public class UsuarioService {
     }
 
     /**
-     * Lista todos os usuários (apenas não deletados)
-     */
-    @Transactional(readOnly = true)
-    public List<UsuarioDTO> listarTodos() {
-        return usuarioRepository.findAll(UsuarioSpecification.comFiltros(
-                UsuarioFiltroRequest.builder()
-                        .incluirDeletados(false)
-                        .build()
-        )).stream()
-                .map(UsuarioDTO::fromEntity)
-                .collect(Collectors.toList());
-    }
-
-    /**
      * Lista usuários com paginação (apenas não deletados)
+     * Valida tamanho máximo de página para evitar sobrecarga
      */
     @Transactional(readOnly = true)
     public Page<UsuarioDTO> listarTodos(Pageable pageable) {
+        // Valida e limita tamanho máximo de página (máximo 100 registros)
+        int pageSize = Math.min(pageable.getPageSize(), 100);
+        int pageNumber = pageable.getPageNumber();
+        
+        // Cria novo Pageable com tamanho validado
+        Pageable validatedPageable = PageRequest.of(
+            pageNumber,
+            pageSize,
+            pageable.getSort().isSorted() ? pageable.getSort() : Sort.by("nome")
+        );
+        
         Specification<Usuario> spec = UsuarioSpecification.comFiltros(
                 UsuarioFiltroRequest.builder()
                         .incluirDeletados(false)
                         .build()
         );
-        return usuarioRepository.findAll(spec, pageable)
+        
+        // Usa JOIN FETCH para evitar N+1 queries
+        return usuarioRepository.findAll(spec, validatedPageable)
                 .map(UsuarioDTO::fromEntity);
     }
 
     /**
      * Lista usuários com filtros e paginação
+     * Valida tamanho máximo de página para evitar sobrecarga
      */
     @Transactional(readOnly = true)
     public Page<UsuarioDTO> listarComFiltros(UsuarioFiltroRequest filtros) {
         Specification<Usuario> spec = UsuarioSpecification.comFiltros(filtros);
         
+        // Valida e limita tamanho máximo de página (máximo 100 registros)
+        int pageSize = Math.min(filtros.getSize() != null ? filtros.getSize() : 10, 100);
+        int pageNumber = filtros.getPage() != null ? filtros.getPage() : 0;
+        
         // Configurar ordenação
         Sort sort = Sort.by(
-                filtros.getSortDirection().equalsIgnoreCase("DESC") 
+                filtros.getSortDirection() != null && filtros.getSortDirection().equalsIgnoreCase("DESC") 
                         ? Sort.Direction.DESC 
                         : Sort.Direction.ASC,
-                filtros.getSortBy()
+                filtros.getSortBy() != null ? filtros.getSortBy() : "nome"
         );
         
-        // Configurar paginação
+        // Configurar paginação com tamanho validado
         Pageable pageable = PageRequest.of(
-                filtros.getPage(),
-                filtros.getSize(),
+                pageNumber,
+                pageSize,
                 sort
         );
         

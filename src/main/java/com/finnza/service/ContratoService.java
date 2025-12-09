@@ -170,6 +170,7 @@ public class ContratoService {
      * Sincroniza status de um contrato com o Asaas
      * Consulta o status atual das cobranças no Asaas e atualiza no banco
      */
+    @Transactional
     public ContratoDTO sincronizarStatusComAsaas(Long id) {
         Contrato contrato = contratoRepository.findById(id)
                 .orElseThrow(() -> new RuntimeException("Contrato não encontrado"));

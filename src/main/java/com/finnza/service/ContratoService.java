@@ -27,7 +27,6 @@ import java.util.stream.Collectors;
  */
 @Slf4j
 @Service
-@Transactional
 public class ContratoService {
 
     @Autowired
@@ -45,6 +44,7 @@ public class ContratoService {
     /**
      * Cria um novo contrato
      */
+    @Transactional
     public ContratoDTO criarContrato(CriarContratoRequest request) {
         // Buscar ou criar cliente
         Cliente cliente = buscarOuCriarCliente(request.getDadosCliente());
@@ -157,6 +157,7 @@ public class ContratoService {
     /**
      * Remove contrato (soft delete)
      */
+    @Transactional
     public void removerContrato(Long id) {
         Contrato contrato = contratoRepository.findById(id)
                 .orElseThrow(() -> new RuntimeException("Contrato não encontrado"));
@@ -496,7 +497,9 @@ public class ContratoService {
     /**
      * Importa contratos do Asaas para o banco de dados
      * Busca assinaturas e cobranças do Asaas e cria/atualiza no banco
+     * Não usa transação única para permitir que erros individuais não revertam tudo
      */
+    @Transactional(propagation = org.springframework.transaction.annotation.Propagation.NOT_SUPPORTED)
     public int importarContratosDoAsaas() {
         if (asaasService.isMockEnabled()) {
             log.warn("Modo mock ativado. Não é possível importar contratos do Asaas.");
@@ -569,45 +572,17 @@ public class ContratoService {
                     }
 
                     if (cliente == null) {
-                        // Criar novo cliente
-                        cliente = Cliente.builder()
-                                .razaoSocial((String) clienteAsaas.get("name"))
-                                .cpfCnpj(cpfCnpj)
-                                .emailFinanceiro((String) clienteAsaas.get("email"))
-                                .asaasCustomerId(customerId)
-                                .build();
-                        cliente = clienteRepository.save(cliente);
+                        // Criar novo cliente em transação separada
+                        cliente = criarClienteImportado(clienteAsaas, customerId, cpfCnpj);
                     }
 
-                    // Criar contrato
-                    Object valorObj = assinatura.get("value");
-                    BigDecimal valor = valorObj != null ? new BigDecimal(valorObj.toString()) : BigDecimal.ZERO;
-                    
-                    Object nextDueDateObj = assinatura.get("nextDueDate");
-                    LocalDate dataVencimento = null;
-                    if (nextDueDateObj != null) {
-                        String dateStr = nextDueDateObj.toString();
-                        if (dateStr.length() >= 10) {
-                            dataVencimento = LocalDate.parse(dateStr.substring(0, 10));
-                        }
+                    // Criar contrato em transação separada
+                    Contrato contrato = criarContratoRecorrenteImportado(assinatura, cliente, subscriptionId);
+                    if (contrato != null) {
+                        contratosImportados++;
+                        log.info("✓ Contrato importado com sucesso: ID={}, SubscriptionId={}, Cliente={}", 
+                                contrato.getId(), subscriptionId, cliente.getRazaoSocial());
                     }
-
-                    Contrato contrato = Contrato.builder()
-                            .titulo((String) assinatura.get("description"))
-                            .descricao("Contrato importado do Asaas")
-                            .cliente(cliente)
-                            .valorRecorrencia(valor)
-                            .dataVencimento(dataVencimento != null ? dataVencimento : LocalDate.now().plusMonths(1))
-                            .status(Contrato.StatusContrato.PENDENTE)
-                            .tipoPagamento(Contrato.TipoPagamento.RECORRENTE)
-                            .asaasSubscriptionId(subscriptionId)
-                            .build();
-
-                    contrato = contratoRepository.save(contrato);
-                    contratosImportados++;
-
-                    log.info("✓ Contrato importado com sucesso: ID={}, SubscriptionId={}, Cliente={}", 
-                            contrato.getId(), subscriptionId, cliente.getRazaoSocial());
                 } catch (Exception e) {
                     erros++;
                     log.error("✗ Erro ao importar assinatura {}: {}", assinatura.get("id"), e.getMessage(), e);
@@ -664,60 +639,15 @@ public class ContratoService {
                     }
 
                     if (cliente == null) {
-                        // Criar cliente se não existir
-                        cliente = Cliente.builder()
-                                .razaoSocial((String) clienteAsaas.get("name"))
-                                .cpfCnpj(cpfCnpj)
-                                .emailFinanceiro((String) clienteAsaas.get("email"))
-                                .asaasCustomerId(customerId)
-                                .build();
-                        cliente = clienteRepository.save(cliente);
+                        // Criar cliente se não existir em transação separada
+                        cliente = criarClienteImportado(clienteAsaas, customerId, cpfCnpj);
                     }
 
-                    // Criar contrato único para essa cobrança
-                    Object valorObj = cobrancaAsaas.get("value");
-                    BigDecimal valor = valorObj != null ? new BigDecimal(valorObj.toString()) : BigDecimal.ZERO;
-                    
-                    Object dueDateObj = cobrancaAsaas.get("dueDate");
-                    LocalDate dataVencimento = null;
-                    if (dueDateObj != null) {
-                        String dateStr = dueDateObj.toString();
-                        if (dateStr.length() >= 10) {
-                            dataVencimento = LocalDate.parse(dateStr.substring(0, 10));
-                        }
+                    // Criar contrato e cobrança em transação separada
+                    boolean sucesso = criarContratoUnicoImportado(cobrancaAsaas, cliente, paymentId);
+                    if (sucesso) {
+                        contratosImportados++;
                     }
-
-                    Contrato contrato = Contrato.builder()
-                            .titulo((String) cobrancaAsaas.get("description"))
-                            .descricao("Contrato único importado do Asaas")
-                            .cliente(cliente)
-                            .valorContrato(valor)
-                            .dataVencimento(dataVencimento != null ? dataVencimento : LocalDate.now().plusDays(30))
-                            .status(Contrato.StatusContrato.PENDENTE)
-                            .tipoPagamento(Contrato.TipoPagamento.UNICO)
-                            .build();
-
-                    contrato = contratoRepository.save(contrato);
-
-                    // Criar cobrança
-                    String statusStr = (String) cobrancaAsaas.get("status");
-                    Cobranca.StatusCobranca status = mapearStatusCobranca(statusStr);
-
-                    Cobranca cobranca = Cobranca.builder()
-                            .contrato(contrato)
-                            .valor(valor)
-                            .dataVencimento(dataVencimento)
-                            .status(status)
-                            .asaasPaymentId(paymentId)
-                            .linkPagamento((String) cobrancaAsaas.get("invoiceUrl"))
-                            .codigoBarras((String) cobrancaAsaas.get("barcode"))
-                            .build();
-
-                    cobrancaRepository.save(cobranca);
-                    contratosImportados++;
-
-                    log.info("✓ Cobrança única importada com sucesso: ID={}, PaymentId={}, Cliente={}", 
-                            cobranca.getId(), paymentId, cliente.getRazaoSocial());
                 } catch (Exception e) {
                     erros++;
                     log.error("✗ Erro ao importar cobrança {}: {}", cobrancaAsaas.get("id"), e.getMessage(), e);
@@ -734,6 +664,111 @@ public class ContratoService {
         } catch (Exception e) {
             log.error("Erro ao importar contratos do Asaas", e);
             throw new RuntimeException("Erro ao importar contratos do Asaas: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Cria cliente importado em transação separada
+     */
+    @Transactional(propagation = org.springframework.transaction.annotation.Propagation.REQUIRES_NEW)
+    private Cliente criarClienteImportado(Map<String, Object> clienteAsaas, String customerId, String cpfCnpj) {
+        Cliente cliente = Cliente.builder()
+                .razaoSocial((String) clienteAsaas.get("name"))
+                .cpfCnpj(cpfCnpj)
+                .emailFinanceiro((String) clienteAsaas.get("email"))
+                .asaasCustomerId(customerId)
+                .build();
+        return clienteRepository.save(cliente);
+    }
+
+    /**
+     * Cria contrato recorrente importado em transação separada
+     */
+    @Transactional(propagation = org.springframework.transaction.annotation.Propagation.REQUIRES_NEW)
+    private Contrato criarContratoRecorrenteImportado(Map<String, Object> assinatura, Cliente cliente, String subscriptionId) {
+        try {
+            Object valorObj = assinatura.get("value");
+            BigDecimal valor = valorObj != null ? new BigDecimal(valorObj.toString()) : BigDecimal.ZERO;
+            
+            Object nextDueDateObj = assinatura.get("nextDueDate");
+            LocalDate dataVencimento = null;
+            if (nextDueDateObj != null) {
+                String dateStr = nextDueDateObj.toString();
+                if (dateStr.length() >= 10) {
+                    dataVencimento = LocalDate.parse(dateStr.substring(0, 10));
+                }
+            }
+
+            Contrato contrato = Contrato.builder()
+                    .titulo((String) assinatura.get("description"))
+                    .descricao("Contrato importado do Asaas")
+                    .cliente(cliente)
+                    .valorRecorrencia(valor)
+                    .dataVencimento(dataVencimento != null ? dataVencimento : LocalDate.now().plusMonths(1))
+                    .status(Contrato.StatusContrato.PENDENTE)
+                    .tipoPagamento(Contrato.TipoPagamento.RECORRENTE)
+                    .asaasSubscriptionId(subscriptionId)
+                    .build();
+
+            return contratoRepository.save(contrato);
+        } catch (Exception e) {
+            log.error("Erro ao criar contrato recorrente importado: {}", e.getMessage(), e);
+            return null;
+        }
+    }
+
+    /**
+     * Cria contrato único e cobrança importados em transação separada
+     */
+    @Transactional(propagation = org.springframework.transaction.annotation.Propagation.REQUIRES_NEW)
+    private boolean criarContratoUnicoImportado(Map<String, Object> cobrancaAsaas, Cliente cliente, String paymentId) {
+        try {
+            Object valorObj = cobrancaAsaas.get("value");
+            BigDecimal valor = valorObj != null ? new BigDecimal(valorObj.toString()) : BigDecimal.ZERO;
+            
+            Object dueDateObj = cobrancaAsaas.get("dueDate");
+            LocalDate dataVencimento = null;
+            if (dueDateObj != null) {
+                String dateStr = dueDateObj.toString();
+                if (dateStr.length() >= 10) {
+                    dataVencimento = LocalDate.parse(dateStr.substring(0, 10));
+                }
+            }
+
+            Contrato contrato = Contrato.builder()
+                    .titulo((String) cobrancaAsaas.get("description"))
+                    .descricao("Contrato único importado do Asaas")
+                    .cliente(cliente)
+                    .valorContrato(valor)
+                    .dataVencimento(dataVencimento != null ? dataVencimento : LocalDate.now().plusDays(30))
+                    .status(Contrato.StatusContrato.PENDENTE)
+                    .tipoPagamento(Contrato.TipoPagamento.UNICO)
+                    .build();
+
+            contrato = contratoRepository.save(contrato);
+
+            // Criar cobrança
+            String statusStr = (String) cobrancaAsaas.get("status");
+            Cobranca.StatusCobranca status = mapearStatusCobranca(statusStr);
+
+            Cobranca cobranca = Cobranca.builder()
+                    .contrato(contrato)
+                    .valor(valor)
+                    .dataVencimento(dataVencimento)
+                    .status(status)
+                    .asaasPaymentId(paymentId)
+                    .linkPagamento((String) cobrancaAsaas.get("invoiceUrl"))
+                    .codigoBarras((String) cobrancaAsaas.get("barcode"))
+                    .build();
+
+            cobrancaRepository.save(cobranca);
+            
+            log.info("✓ Cobrança única importada com sucesso: ID={}, PaymentId={}, Cliente={}", 
+                    cobranca.getId(), paymentId, cliente.getRazaoSocial());
+            return true;
+        } catch (Exception e) {
+            log.error("Erro ao criar contrato único importado: {}", e.getMessage(), e);
+            return false;
         }
     }
 }

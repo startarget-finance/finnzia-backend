@@ -15,9 +15,11 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.stream.Collectors;
 
 /**
@@ -489,6 +491,198 @@ public class ContratoService {
                 .dataCriacao(contrato.getDataCriacao())
                 .dataAtualizacao(contrato.getDataAtualizacao())
                 .build();
+    }
+
+    /**
+     * Importa contratos do Asaas para o banco de dados
+     * Busca assinaturas e cobranças do Asaas e cria/atualiza no banco
+     */
+    public int importarContratosDoAsaas() {
+        if (asaasService.isMockEnabled()) {
+            log.warn("Modo mock ativado. Não é possível importar contratos do Asaas.");
+            return 0;
+        }
+
+        int contratosImportados = 0;
+
+        try {
+            // Buscar assinaturas do Asaas
+            java.util.List<Map<String, Object>> assinaturas = asaasService.listarAssinaturas();
+            log.info("Encontradas {} assinaturas no Asaas para importar", assinaturas.size());
+
+            for (Map<String, Object> assinatura : assinaturas) {
+                try {
+                    String subscriptionId = (String) assinatura.get("id");
+                    String customerId = (String) assinatura.get("customer");
+                    
+                    // Verificar se já existe contrato com essa assinatura
+                    Optional<Contrato> contratoExistente = contratoRepository.findByAsaasSubscriptionId(subscriptionId);
+                    if (contratoExistente.isPresent()) {
+                        log.debug("Contrato já existe para subscriptionId: {}", subscriptionId);
+                        continue;
+                    }
+
+                    // Buscar cliente no Asaas
+                    Map<String, Object> clienteAsaas = asaasService.buscarClientePorId(customerId);
+                    if (clienteAsaas.isEmpty()) {
+                        log.warn("Cliente não encontrado no Asaas: {}", customerId);
+                        continue;
+                    }
+
+                    // Buscar ou criar cliente no banco
+                    String cpfCnpj = (String) clienteAsaas.get("cpfCnpj");
+                    Cliente cliente = null;
+                    if (cpfCnpj != null && !cpfCnpj.isEmpty()) {
+                        Optional<Cliente> clienteOpt = clienteRepository.findByCpfCnpj(cpfCnpj);
+                        if (clienteOpt.isPresent()) {
+                            cliente = clienteOpt.get();
+                            // Atualizar ID do Asaas se não tiver
+                            if (cliente.getAsaasCustomerId() == null) {
+                                cliente.setAsaasCustomerId(customerId);
+                                clienteRepository.save(cliente);
+                            }
+                        }
+                    }
+
+                    if (cliente == null) {
+                        // Criar novo cliente
+                        cliente = Cliente.builder()
+                                .razaoSocial((String) clienteAsaas.get("name"))
+                                .cpfCnpj(cpfCnpj)
+                                .emailFinanceiro((String) clienteAsaas.get("email"))
+                                .asaasCustomerId(customerId)
+                                .build();
+                        cliente = clienteRepository.save(cliente);
+                    }
+
+                    // Criar contrato
+                    Object valorObj = assinatura.get("value");
+                    BigDecimal valor = valorObj != null ? new BigDecimal(valorObj.toString()) : BigDecimal.ZERO;
+                    
+                    Object nextDueDateObj = assinatura.get("nextDueDate");
+                    LocalDate dataVencimento = null;
+                    if (nextDueDateObj != null) {
+                        String dateStr = nextDueDateObj.toString();
+                        if (dateStr.length() >= 10) {
+                            dataVencimento = LocalDate.parse(dateStr.substring(0, 10));
+                        }
+                    }
+
+                    Contrato contrato = Contrato.builder()
+                            .titulo((String) assinatura.get("description"))
+                            .descricao("Contrato importado do Asaas")
+                            .cliente(cliente)
+                            .valorRecorrencia(valor)
+                            .dataVencimento(dataVencimento != null ? dataVencimento : LocalDate.now().plusMonths(1))
+                            .status(Contrato.StatusContrato.PENDENTE)
+                            .tipoPagamento(Contrato.TipoPagamento.RECORRENTE)
+                            .asaasSubscriptionId(subscriptionId)
+                            .build();
+
+                    contrato = contratoRepository.save(contrato);
+                    contratosImportados++;
+
+                    log.info("Contrato importado: {} - SubscriptionId: {}", contrato.getId(), subscriptionId);
+                } catch (Exception e) {
+                    log.error("Erro ao importar assinatura: {}", assinatura.get("id"), e);
+                }
+            }
+
+            // Buscar cobranças únicas (payments) do Asaas
+            java.util.List<Map<String, Object>> cobrancas = asaasService.listarCobrancas();
+            log.info("Encontradas {} cobranças no Asaas para importar", cobrancas.size());
+
+            for (Map<String, Object> cobrancaAsaas : cobrancas) {
+                try {
+                    String paymentId = (String) cobrancaAsaas.get("id");
+                    String customerId = (String) cobrancaAsaas.get("customer");
+                    
+                    // Verificar se já existe cobrança com esse paymentId
+                    Optional<Cobranca> cobrancaExistente = cobrancaRepository.findByAsaasPaymentId(paymentId);
+                    if (cobrancaExistente.isPresent()) {
+                        continue;
+                    }
+
+                    // Buscar cliente
+                    Map<String, Object> clienteAsaas = asaasService.buscarClientePorId(customerId);
+                    if (clienteAsaas.isEmpty()) {
+                        continue;
+                    }
+
+                    String cpfCnpj = (String) clienteAsaas.get("cpfCnpj");
+                    Cliente cliente = null;
+                    if (cpfCnpj != null && !cpfCnpj.isEmpty()) {
+                        Optional<Cliente> clienteOpt = clienteRepository.findByCpfCnpj(cpfCnpj);
+                        if (clienteOpt.isPresent()) {
+                            cliente = clienteOpt.get();
+                        }
+                    }
+
+                    if (cliente == null) {
+                        // Criar cliente se não existir
+                        cliente = Cliente.builder()
+                                .razaoSocial((String) clienteAsaas.get("name"))
+                                .cpfCnpj(cpfCnpj)
+                                .emailFinanceiro((String) clienteAsaas.get("email"))
+                                .asaasCustomerId(customerId)
+                                .build();
+                        cliente = clienteRepository.save(cliente);
+                    }
+
+                    // Criar contrato único para essa cobrança
+                    Object valorObj = cobrancaAsaas.get("value");
+                    BigDecimal valor = valorObj != null ? new BigDecimal(valorObj.toString()) : BigDecimal.ZERO;
+                    
+                    Object dueDateObj = cobrancaAsaas.get("dueDate");
+                    LocalDate dataVencimento = null;
+                    if (dueDateObj != null) {
+                        String dateStr = dueDateObj.toString();
+                        if (dateStr.length() >= 10) {
+                            dataVencimento = LocalDate.parse(dateStr.substring(0, 10));
+                        }
+                    }
+
+                    Contrato contrato = Contrato.builder()
+                            .titulo((String) cobrancaAsaas.get("description"))
+                            .descricao("Contrato único importado do Asaas")
+                            .cliente(cliente)
+                            .valorContrato(valor)
+                            .dataVencimento(dataVencimento != null ? dataVencimento : LocalDate.now().plusDays(30))
+                            .status(Contrato.StatusContrato.PENDENTE)
+                            .tipoPagamento(Contrato.TipoPagamento.UNICO)
+                            .build();
+
+                    contrato = contratoRepository.save(contrato);
+
+                    // Criar cobrança
+                    String statusStr = (String) cobrancaAsaas.get("status");
+                    Cobranca.StatusCobranca status = mapearStatusCobranca(statusStr);
+
+                    Cobranca cobranca = Cobranca.builder()
+                            .contrato(contrato)
+                            .valor(valor)
+                            .dataVencimento(dataVencimento)
+                            .status(status)
+                            .asaasPaymentId(paymentId)
+                            .linkPagamento((String) cobrancaAsaas.get("invoiceUrl"))
+                            .codigoBarras((String) cobrancaAsaas.get("barcode"))
+                            .build();
+
+                    cobrancaRepository.save(cobranca);
+                    contratosImportados++;
+
+                    log.info("Cobrança única importada: {} - PaymentId: {}", cobranca.getId(), paymentId);
+                } catch (Exception e) {
+                    log.error("Erro ao importar cobrança: {}", cobrancaAsaas.get("id"), e);
+                }
+            }
+
+            log.info("Importação concluída. {} contratos importados do Asaas", contratosImportados);
+            return contratosImportados;
+        } catch (Exception e) {
+            log.error("Erro ao importar contratos do Asaas", e);
+            throw new RuntimeException("Erro ao importar contratos do Asaas: " + e.getMessage(), e);
+        }
     }
 }
 

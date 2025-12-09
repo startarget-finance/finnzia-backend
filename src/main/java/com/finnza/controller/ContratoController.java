@@ -14,6 +14,8 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.Map;
+
 /**
  * Controller para gerenciamento de contratos
  */
@@ -112,6 +114,20 @@ public class ContratoController {
     public ResponseEntity<ContratoDTO> sincronizarStatusComAsaas(@PathVariable Long id) {
         ContratoDTO contrato = contratoService.sincronizarStatusComAsaas(id);
         return ResponseEntity.ok(contrato);
+    }
+
+    /**
+     * Importa contratos do Asaas para o banco de dados
+     * Útil para sincronizar dados quando o banco está vazio
+     */
+    @PostMapping("/importar-asaas")
+    @PreAuthorize("hasPermission(null, 'CONTRATOS')")
+    public ResponseEntity<Map<String, Object>> importarContratosDoAsaas() {
+        int contratosImportados = contratoService.importarContratosDoAsaas();
+        Map<String, Object> response = new java.util.HashMap<>();
+        response.put("contratosImportados", contratosImportados);
+        response.put("mensagem", String.format("%d contratos importados com sucesso do Asaas", contratosImportados));
+        return ResponseEntity.ok(response);
     }
 }
 

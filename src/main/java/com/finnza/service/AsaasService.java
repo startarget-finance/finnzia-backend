@@ -319,6 +319,90 @@ public class AsaasService {
     }
 
     /**
+     * Lista assinaturas do Asaas
+     */
+    @SuppressWarnings("unchecked")
+    public java.util.List<Map<String, Object>> listarAssinaturas() {
+        if (mockEnabled) {
+            return new java.util.ArrayList<>();
+        }
+
+        try {
+            Map<String, Object> response = webClient.get()
+                    .uri("/subscriptions")
+                    .header("access_token", apiKey)
+                    .retrieve()
+                    .bodyToMono(Map.class)
+                    .block();
+
+            java.util.List<Map<String, Object>> data = (java.util.List<Map<String, Object>>) response.get("data");
+            if (data == null) {
+                return new java.util.ArrayList<>();
+            }
+            
+            log.info("Encontradas {} assinaturas no Asaas", data.size());
+            return data;
+        } catch (Exception e) {
+            log.error("Erro ao listar assinaturas do Asaas", e);
+            return new java.util.ArrayList<>();
+        }
+    }
+
+    /**
+     * Lista cobranças do Asaas
+     */
+    @SuppressWarnings("unchecked")
+    public java.util.List<Map<String, Object>> listarCobrancas() {
+        if (mockEnabled) {
+            return new java.util.ArrayList<>();
+        }
+
+        try {
+            Map<String, Object> response = webClient.get()
+                    .uri("/payments")
+                    .header("access_token", apiKey)
+                    .retrieve()
+                    .bodyToMono(Map.class)
+                    .block();
+
+            java.util.List<Map<String, Object>> data = (java.util.List<Map<String, Object>>) response.get("data");
+            if (data == null) {
+                return new java.util.ArrayList<>();
+            }
+            
+            log.info("Encontradas {} cobranças no Asaas", data.size());
+            return data;
+        } catch (Exception e) {
+            log.error("Erro ao listar cobranças do Asaas", e);
+            return new java.util.ArrayList<>();
+        }
+    }
+
+    /**
+     * Busca detalhes de um cliente no Asaas
+     */
+    @SuppressWarnings("unchecked")
+    public Map<String, Object> buscarClientePorId(String customerId) {
+        if (mockEnabled) {
+            return new HashMap<>();
+        }
+
+        try {
+            Map<String, Object> response = webClient.get()
+                    .uri("/customers/{id}", customerId)
+                    .header("access_token", apiKey)
+                    .retrieve()
+                    .bodyToMono(Map.class)
+                    .block();
+
+            return response != null ? response : new HashMap<>();
+        } catch (Exception e) {
+            log.error("Erro ao buscar cliente no Asaas por ID: {}", customerId, e);
+            return new HashMap<>();
+        }
+    }
+
+    /**
      * Verifica se está em modo mock
      */
     public boolean isMockEnabled() {

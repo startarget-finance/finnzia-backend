@@ -69,6 +69,8 @@ public class SecurityConfig {
                 .requestMatchers("/api/auth/**").permitAll()
                 .requestMatchers("/api/public/**").permitAll()
                 .requestMatchers("/api/usuarios/primeiro-admin").permitAll()
+                .requestMatchers("/api/webhooks/asaas").permitAll() // Webhook do Asaas (sem autenticação)
+                .requestMatchers("/api/test/**").authenticated() // Endpoint de teste (requer autenticação)
                 .requestMatchers("/actuator/health").permitAll()
                 .anyRequest().authenticated()
             )

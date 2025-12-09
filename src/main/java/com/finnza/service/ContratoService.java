@@ -71,7 +71,7 @@ public class ContratoService {
         // Integrar com Asaas
         try {
             if (request.getTipoPagamento() == Contrato.TipoPagamento.UNICO) {
-                criarCobrancaUnica(contrato, cliente);
+                criarCobrancaUnica(contrato, cliente, request);
             } else {
                 criarAssinatura(contrato, cliente);
             }
@@ -391,18 +391,29 @@ public class ContratoService {
     /**
      * Cria cobrança única no Asaas
      */
-    private void criarCobrancaUnica(Contrato contrato, Cliente cliente) {
+    private void criarCobrancaUnica(Contrato contrato, Cliente cliente, CriarContratoRequest request) {
         if (cliente.getAsaasCustomerId() == null) {
             log.warn("Cliente {} não tem ID do Asaas, pulando criação de cobrança", cliente.getId());
             return;
         }
 
         String descricao = String.format("Contrato: %s", contrato.getTitulo());
+        if (request.getDescricao() != null && !request.getDescricao().isEmpty()) {
+            descricao = request.getDescricao();
+        }
+        
         Map<String, Object> response = asaasService.criarCobrancaUnica(
                 cliente.getAsaasCustomerId(),
                 contrato.getValorContrato(),
                 contrato.getDataVencimento(),
-                descricao
+                descricao,
+                request.getFormaPagamento(),
+                request.getJurosAoMes(),
+                request.getMultaPorAtraso(),
+                request.getDescontoPercentual(),
+                request.getDescontoValorFixo(),
+                request.getPrazoMaximoDesconto(),
+                request.getNumeroParcelas()
         );
 
         // Criar cobrança no banco

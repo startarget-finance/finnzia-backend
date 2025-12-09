@@ -170,16 +170,66 @@ public class AsaasService {
      * Cria uma cobrança única no Asaas
      */
     public Map<String, Object> criarCobrancaUnica(String customerId, BigDecimal valor, LocalDate dataVencimento, String descricao) {
+        return criarCobrancaUnica(customerId, valor, dataVencimento, descricao, null, null, null, null, null, null, null);
+    }
+
+    /**
+     * Cria uma cobrança única no Asaas com configurações avançadas
+     */
+    public Map<String, Object> criarCobrancaUnica(
+            String customerId, 
+            BigDecimal valor, 
+            LocalDate dataVencimento, 
+            String descricao,
+            String formaPagamento,
+            BigDecimal jurosAoMes,
+            BigDecimal multaPorAtraso,
+            BigDecimal descontoPercentual,
+            BigDecimal descontoValorFixo,
+            Integer prazoMaximoDesconto,
+            Integer numeroParcelas) {
         if (mockEnabled) {
             return criarCobrancaMock(customerId, valor, dataVencimento, descricao);
         }
 
         Map<String, Object> requestBody = new HashMap<>();
         requestBody.put("customer", customerId);
-        requestBody.put("billingType", "BOLETO"); // Pode ser BOLETO, CREDIT_CARD, PIX, etc.
+        requestBody.put("billingType", formaPagamento != null && !formaPagamento.isEmpty() ? formaPagamento : "BOLETO");
         requestBody.put("value", valor);
         requestBody.put("dueDate", dataVencimento.format(DateTimeFormatter.ofPattern("yyyy-MM-dd")));
         requestBody.put("description", descricao);
+        
+        // Configurações de juros e multa
+        if (jurosAoMes != null && jurosAoMes.compareTo(BigDecimal.ZERO) > 0) {
+            requestBody.put("interest", jurosAoMes);
+        }
+        if (multaPorAtraso != null && multaPorAtraso.compareTo(BigDecimal.ZERO) > 0) {
+            requestBody.put("fine", Map.of("value", multaPorAtraso, "type", "PERCENTAGE"));
+        }
+        
+        // Configurações de desconto
+        if (descontoPercentual != null && descontoPercentual.compareTo(BigDecimal.ZERO) > 0) {
+            Map<String, Object> discount = new HashMap<>();
+            discount.put("value", descontoPercentual);
+            discount.put("type", "PERCENTAGE");
+            if (prazoMaximoDesconto != null && prazoMaximoDesconto > 0) {
+                discount.put("dueDateLimitDays", prazoMaximoDesconto);
+            }
+            requestBody.put("discount", discount);
+        } else if (descontoValorFixo != null && descontoValorFixo.compareTo(BigDecimal.ZERO) > 0) {
+            Map<String, Object> discount = new HashMap<>();
+            discount.put("value", descontoValorFixo);
+            discount.put("type", "FIXED");
+            if (prazoMaximoDesconto != null && prazoMaximoDesconto > 0) {
+                discount.put("dueDateLimitDays", prazoMaximoDesconto);
+            }
+            requestBody.put("discount", discount);
+        }
+        
+        // Parcelas (se for mais de 1)
+        if (numeroParcelas != null && numeroParcelas > 1) {
+            requestBody.put("installmentCount", numeroParcelas);
+        }
 
         try {
             @SuppressWarnings("unchecked")

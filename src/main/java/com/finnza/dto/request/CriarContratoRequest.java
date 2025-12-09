@@ -53,6 +53,34 @@ public class CriarContratoRequest {
     @Pattern(regexp = "^\\+?[1-9]\\d{1,14}$", message = "WhatsApp inválido")
     private String whatsapp;
 
+    // Configurações de pagamento do Asaas
+    private String formaPagamento; // BOLETO, PIX, CREDIT_CARD, DEBIT_CARD
+    
+    // Juros e multa
+    @DecimalMin(value = "0.0", message = "Juros não pode ser negativo")
+    @Digits(integer = 5, fraction = 2, message = "Juros inválido")
+    private BigDecimal jurosAoMes; // Percentual de juros ao mês
+    
+    @DecimalMin(value = "0.0", message = "Multa não pode ser negativa")
+    @Digits(integer = 5, fraction = 2, message = "Multa inválida")
+    private BigDecimal multaPorAtraso; // Percentual de multa por atraso
+    
+    // Desconto
+    @DecimalMin(value = "0.0", message = "Desconto não pode ser negativo")
+    @Digits(integer = 5, fraction = 2, message = "Desconto inválido")
+    private BigDecimal descontoPercentual; // Percentual de desconto
+    
+    @DecimalMin(value = "0.0", message = "Desconto não pode ser negativo")
+    @Digits(integer = 13, fraction = 2, message = "Desconto inválido")
+    private BigDecimal descontoValorFixo; // Valor fixo de desconto
+    
+    private Integer prazoMaximoDesconto; // Dias para aplicar desconto
+    
+    // Parcelas (apenas para contratos únicos)
+    @Min(value = 1, message = "Número de parcelas deve ser pelo menos 1")
+    @Max(value = 12, message = "Número de parcelas não pode ser maior que 12")
+    private Integer numeroParcelas; // Número de parcelas (1 = à vista)
+
     /**
      * Dados do cliente (pode ser novo ou existente)
      */

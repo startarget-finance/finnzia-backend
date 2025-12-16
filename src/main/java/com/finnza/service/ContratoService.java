@@ -783,5 +783,37 @@ public class ContratoService {
             return false;
         }
     }
+
+    /**
+     * Limpa todos os contratos do banco de dados (hard delete)
+     * ATENÇÃO: Esta operação é irreversível!
+     * Deleta também todas as cobranças associadas (cascade)
+     */
+    @Transactional
+    public int limparTodosContratos() {
+        log.warn("⚠️ INICIANDO LIMPEZA COMPLETA DE CONTRATOS - OPERAÇÃO IRREVERSÍVEL!");
+        
+        // Conta antes de deletar
+        long totalContratos = contratoRepository.count();
+        long totalCobrancas = cobrancaRepository.count();
+        
+        log.info("📊 Total de contratos a serem deletados: {}", totalContratos);
+        log.info("📊 Total de cobranças a serem deletadas: {}", totalCobrancas);
+        
+        // Deleta todas as cobranças primeiro (para evitar problemas de FK)
+        // Mas como temos cascade, podemos deletar direto os contratos
+        // Vamos deletar as cobranças primeiro por segurança
+        cobrancaRepository.deleteAll();
+        log.info("✓ Todas as cobranças foram deletadas");
+        
+        // Deleta todos os contratos
+        contratoRepository.deleteAll();
+        log.info("✓ Todos os contratos foram deletados");
+        
+        log.warn("⚠️ LIMPEZA COMPLETA CONCLUÍDA: {} contratos e {} cobranças removidos", 
+                totalContratos, totalCobrancas);
+        
+        return (int) totalContratos;
+    }
 }
 

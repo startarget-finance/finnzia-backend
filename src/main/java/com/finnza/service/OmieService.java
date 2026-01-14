@@ -43,6 +43,12 @@ public class OmieService {
     // Cache de totais calculados (chave: dataInicio_dataFim, valor: TotaisCache)
     private final Map<String, TotaisCache> cacheTotais = new ConcurrentHashMap<>();
     
+    // Cache de requisições recentes para evitar consumo redundante (chave: endpoint_call_params, valor: ResponseCache)
+    private final Map<String, ResponseCache> cacheRequisicoes = new ConcurrentHashMap<>();
+    
+    // Locks por chave de requisição para evitar chamadas simultâneas duplicadas
+    private final Map<String, Object> locksRequisicoes = new ConcurrentHashMap<>();
+    
     // Classe interna para armazenar totais com timestamp
     private static class TotaisCache {
         final double totalReceitas;
@@ -54,6 +60,21 @@ public class OmieService {
             this.totalReceitas = totalReceitas;
             this.totalDespesas = totalDespesas;
             this.saldoLiquido = saldoLiquido;
+            this.timestamp = System.currentTimeMillis();
+        }
+        
+        boolean isExpired(long ttlMillis) {
+            return (System.currentTimeMillis() - timestamp) > ttlMillis;
+        }
+    }
+    
+    // Classe interna para cache de respostas da API
+    private static class ResponseCache {
+        final Map<String, Object> response;
+        final long timestamp;
+        
+        ResponseCache(Map<String, Object> response) {
+            this.response = response;
             this.timestamp = System.currentTimeMillis();
         }
         
@@ -246,10 +267,53 @@ public class OmieService {
     }
 
     /**
-     * Executa uma chamada à API OMIE
+     * Gera chave única para cache de requisições
+     */
+    private String gerarChaveCache(String endpoint, String call, Map<String, Object> params) {
+        return endpoint + "|" + call + "|" + params.toString();
+    }
+    
+    /**
+     * Executa uma chamada à API OMIE com cache e retry automático para consumo redundante
      */
     @SuppressWarnings("unchecked")
     private Map<String, Object> executarChamadaApi(String endpoint, String call, Map<String, Object> params) {
+        String cacheKey = gerarChaveCache(endpoint, call, params);
+        
+        // Verifica cache recente (últimos 5 segundos para evitar consumo redundante)
+        ResponseCache cached = cacheRequisicoes.get(cacheKey);
+        if (cached != null && !cached.isExpired(5000)) {
+            log.debug("Retornando resposta do cache para evitar consumo redundante: {}", cacheKey);
+            return new HashMap<>(cached.response);
+        }
+        
+        // Obtém ou cria lock para esta requisição específica
+        Object lock = locksRequisicoes.computeIfAbsent(cacheKey, k -> new Object());
+        
+        // Sincroniza por chave para evitar chamadas simultâneas duplicadas
+        synchronized (lock) {
+            try {
+                // Verifica cache novamente após adquirir lock (pode ter sido atualizado por outra thread)
+                cached = cacheRequisicoes.get(cacheKey);
+                if (cached != null && !cached.isExpired(5000)) {
+                    log.debug("Retornando resposta do cache (após lock): {}", cacheKey);
+                    return new HashMap<>(cached.response);
+                }
+                
+                return executarChamadaApiComRetry(endpoint, call, params, cacheKey);
+            } finally {
+                // Remove lock após 10 segundos para evitar acúmulo de locks
+                locksRequisicoes.remove(cacheKey);
+            }
+        }
+    }
+    
+    /**
+     * Executa chamada à API com retry automático para consumo redundante
+     */
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> executarChamadaApiComRetry(String endpoint, String call, 
+                                                           Map<String, Object> params, String cacheKey) {
         Map<String, Object> requestBody = criarRequestBody(call, params);
         
         // Log do request body (sem app_secret por segurança)
@@ -257,83 +321,132 @@ public class OmieService {
         logBody.put("app_secret", "***HIDDEN***");
         log.debug("Chamando API OMIE: {} - call: {} - body: {}", endpoint, call, logBody);
         
-        try {
-            Map<String, Object> response = webClient.post()
-                    .uri(endpoint)
-                    .bodyValue(requestBody)
-                    .retrieve()
-                    .bodyToMono(Map.class)
-                    .block();
+        int maxRetries = 2;
+        int retryDelaySeconds = 6; // Aguarda 6 segundos (um pouco mais que os 5 recomendados)
+        
+        for (int attempt = 0; attempt <= maxRetries; attempt++) {
+            try {
+                Map<String, Object> response = webClient.post()
+                        .uri(endpoint)
+                        .bodyValue(requestBody)
+                        .retrieve()
+                        .bodyToMono(Map.class)
+                        .block();
 
-            // Verifica se há erro na resposta
-            if (response != null && response.containsKey("faultstring")) {
-                String erro = (String) response.get("faultstring");
-                log.error("Erro retornado pela API OMIE: {}", erro);
-                throw new RuntimeException("Erro na API OMIE: " + erro);
-            }
+                // Verifica se há erro na resposta
+                if (response != null && response.containsKey("faultstring")) {
+                    String erro = (String) response.get("faultstring");
+                    log.error("Erro retornado pela API OMIE: {}", erro);
+                    throw new RuntimeException("Erro na API OMIE: " + erro);
+                }
 
-            return response != null ? response : new HashMap<>();
-        } catch (WebClientResponseException e) {
-            String responseBody = e.getResponseBodyAsString();
-            
-            // Tratamento especial para rate limiting (425 TOO_EARLY)
-            if (e.getStatusCode().value() == 425) {
-                String mensagemRateLimit = "API OMIE temporariamente bloqueada por excesso de requisições. ";
-                if (responseBody != null && responseBody.contains("segundos")) {
-                    try {
-                        // Tenta extrair o número de segundos da mensagem
-                        int inicio = responseBody.indexOf("em ") + 3;
-                        int fim = responseBody.indexOf(" segundos", inicio);
-                        if (fim > inicio) {
-                            String segundos = responseBody.substring(inicio, fim);
-                            mensagemRateLimit += "Tente novamente em " + segundos + " segundos.";
-                        } else {
-                            mensagemRateLimit += "Aguarde alguns minutos antes de tentar novamente.";
+                Map<String, Object> finalResponse = response != null ? response : new HashMap<>();
+                
+                // Armazena no cache para evitar consumo redundante
+                cacheRequisicoes.put(cacheKey, new ResponseCache(finalResponse));
+                
+                return finalResponse;
+            } catch (WebClientResponseException e) {
+                String responseBody = e.getResponseBodyAsString();
+                
+                // Tratamento especial para consumo redundante (500 com mensagem específica)
+                if (e.getStatusCode().value() == 500 && 
+                    responseBody != null && 
+                    (responseBody.contains("Consumo redundante") || responseBody.contains("CACHED"))) {
+                    
+                    if (attempt < maxRetries) {
+                        log.warn("Consumo redundante detectado na API OMIE (tentativa {}/{}). Aguardando {} segundos...", 
+                                attempt + 1, maxRetries + 1, retryDelaySeconds);
+                        try {
+                            Thread.sleep(retryDelaySeconds * 1000L);
+                        } catch (InterruptedException ie) {
+                            Thread.currentThread().interrupt();
+                            throw new RuntimeException("Interrompido durante retry", ie);
                         }
-                    } catch (Exception ex) {
-                        mensagemRateLimit += "Aguarde alguns minutos antes de tentar novamente.";
+                        continue; // Tenta novamente
+                    } else {
+                        String mensagemErro = "ERROR: Consumo redundante detectado. Aguarde 5 segundos para tentar novamente.";
+                        if (responseBody.contains("CACHED:")) {
+                            try {
+                                int inicio = responseBody.indexOf("CACHED:") + 7;
+                                int fim = responseBody.indexOf(")", inicio);
+                                if (fim > inicio) {
+                                    String cacheId = responseBody.substring(inicio, fim).trim();
+                                    mensagemErro += " (CACHED: " + cacheId + ")";
+                                }
+                            } catch (Exception ex) {
+                                // Ignora erro ao extrair cache ID
+                            }
+                        }
+                        log.error("Consumo redundante após {} tentativas: {}", maxRetries + 1, mensagemErro);
+                        throw new RuntimeException(mensagemErro, e);
                     }
-                } else {
-                    mensagemRateLimit += "Aguarde alguns minutos antes de tentar novamente.";
                 }
                 
-                log.warn("Rate limit da API OMIE atingido: {}", mensagemRateLimit);
-                throw new RuntimeException(mensagemRateLimit, e);
-            }
-            
-            // Extrai mensagem de erro da resposta
-            String mensagemErro = "Erro ao chamar API OMIE: " + e.getStatusCode();
-            if (responseBody != null && !responseBody.isEmpty()) {
-                if (responseBody.contains("faultstring")) {
-                    try {
-                        int inicio = responseBody.indexOf("\"faultstring\":\"") + 15;
-                        int fim = responseBody.indexOf("\"", inicio);
-                        if (fim > inicio) {
-                            mensagemErro = responseBody.substring(inicio, fim);
+                // Tratamento especial para rate limiting (425 TOO_EARLY)
+                if (e.getStatusCode().value() == 425) {
+                    String mensagemRateLimit = "API OMIE temporariamente bloqueada por excesso de requisições. ";
+                    if (responseBody != null && responseBody.contains("segundos")) {
+                        try {
+                            // Tenta extrair o número de segundos da mensagem
+                            int inicio = responseBody.indexOf("em ") + 3;
+                            int fim = responseBody.indexOf(" segundos", inicio);
+                            if (fim > inicio) {
+                                String segundos = responseBody.substring(inicio, fim);
+                                mensagemRateLimit += "Tente novamente em " + segundos + " segundos.";
+                            } else {
+                                mensagemRateLimit += "Aguarde alguns minutos antes de tentar novamente.";
+                            }
+                        } catch (Exception ex) {
+                            mensagemRateLimit += "Aguarde alguns minutos antes de tentar novamente.";
                         }
-                    } catch (Exception ex) {
-                        // Ignora erro ao extrair
+                    } else {
+                        mensagemRateLimit += "Aguarde alguns minutos antes de tentar novamente.";
                     }
-                } else if (responseBody.contains("message")) {
-                    try {
-                        int inicio = responseBody.indexOf("\"message\":\"") + 11;
-                        int fim = responseBody.indexOf("\"", inicio);
-                        if (fim > inicio) {
-                            mensagemErro = responseBody.substring(inicio, fim);
+                    
+                    log.warn("Rate limit da API OMIE atingido: {}", mensagemRateLimit);
+                    throw new RuntimeException(mensagemRateLimit, e);
+                }
+                
+                // Extrai mensagem de erro da resposta
+                String mensagemErro = "Erro ao chamar API OMIE: " + e.getStatusCode();
+                if (responseBody != null && !responseBody.isEmpty()) {
+                    if (responseBody.contains("faultstring")) {
+                        try {
+                            int inicio = responseBody.indexOf("\"faultstring\":\"") + 15;
+                            int fim = responseBody.indexOf("\"", inicio);
+                            if (fim > inicio) {
+                                mensagemErro = responseBody.substring(inicio, fim);
+                            }
+                        } catch (Exception ex) {
+                            // Ignora erro ao extrair
                         }
-                    } catch (Exception ex) {
-                        // Ignora erro ao extrair
+                    } else if (responseBody.contains("message")) {
+                        try {
+                            int inicio = responseBody.indexOf("\"message\":\"") + 11;
+                            int fim = responseBody.indexOf("\"", inicio);
+                            if (fim > inicio) {
+                                mensagemErro = responseBody.substring(inicio, fim);
+                            }
+                        } catch (Exception ex) {
+                            // Ignora erro ao extrair
+                        }
                     }
                 }
+                
+                log.error("Erro HTTP ao chamar API OMIE ({}): {} - {}", 
+                        endpoint, e.getStatusCode(), responseBody);
+                throw new RuntimeException(mensagemErro, e);
+            } catch (Exception e) {
+                if (e instanceof RuntimeException && e.getMessage() != null && e.getMessage().contains("Consumo redundante")) {
+                    throw e; // Re-lança erros de consumo redundante sem retry adicional
+                }
+                log.error("Erro inesperado ao chamar API OMIE", e);
+                throw new RuntimeException("Erro ao chamar API OMIE: " + e.getMessage(), e);
             }
-            
-            log.error("Erro HTTP ao chamar API OMIE ({}): {} - {}", 
-                    endpoint, e.getStatusCode(), responseBody);
-            throw new RuntimeException(mensagemErro, e);
-        } catch (Exception e) {
-            log.error("Erro inesperado ao chamar API OMIE", e);
-            throw new RuntimeException("Erro ao chamar API OMIE: " + e.getMessage(), e);
         }
+        
+        throw new RuntimeException("Erro ao chamar API OMIE após " + (maxRetries + 1) + " tentativas");
     }
 
     /**

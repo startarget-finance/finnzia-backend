@@ -676,6 +676,143 @@ public class OmieService {
     }
 
     /**
+     * Processa um movimento do OMIE e retorna uma movimentação normalizada
+     */
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> processarMovimento(Map<String, Object> movimento) {
+        Map<String, Object> detalhesMov = (Map<String, Object>) movimento.get("detalhes");
+        Map<String, Object> resumoMov = (Map<String, Object>) movimento.get("resumo");
+        List<Map<String, Object>> categoriasMov = (List<Map<String, Object>>) movimento.get("categorias");
+        
+        if (detalhesMov == null) {
+            return null;
+        }
+        
+        // Determina se é receita ou despesa
+        String natureza = (String) detalhesMov.getOrDefault("cNatureza", "");
+        boolean isDebito = "P".equals(natureza); // P = Contas a Pagar (despesa)
+        
+        // Extrai valores do resumo (prioriza valores do resumo)
+        // IMPORTANTE: nValLiquido pode ser 0 para títulos não liquidados, então verifica se é null
+        Object valorObj = null;
+        if (resumoMov != null) {
+            // Usa valor líquido do resumo (nValLiquido) se não for null
+            valorObj = resumoMov.get("nValLiquido");
+            if (valorObj == null) {
+                // Se nValLiquido é null, tenta nValAberto (valor em aberto)
+                valorObj = resumoMov.get("nValAberto");
+            }
+            if (valorObj == null) {
+                // Se ainda não tem, tenta nValPago
+                valorObj = resumoMov.get("nValPago");
+            }
+        }
+        
+        // Fallback para valor do título se resumo não tiver ou se nValLiquido for 0
+        // Para títulos não liquidados, nValLiquido pode ser 0, então usa nValorTitulo
+        if (valorObj == null || (valorObj instanceof Number && ((Number) valorObj).doubleValue() == 0.0)) {
+            Object valorTitulo = detalhesMov.get("nValorTitulo");
+            if (valorTitulo != null) {
+                valorObj = valorTitulo;
+            }
+        }
+        
+        // Para movimentações de conta corrente, usa nValorMovCC
+        if (valorObj == null || (valorObj instanceof Number && ((Number) valorObj).doubleValue() == 0.0)) {
+            Object valorMovCC = detalhesMov.get("nValorMovCC");
+            if (valorMovCC != null) {
+                valorObj = valorMovCC;
+            }
+        }
+        
+        double valor = 0.0;
+        if (valorObj != null) {
+            valor = valorObj instanceof Number ? 
+                                    ((Number) valorObj).doubleValue() : 
+                                    Double.parseDouble(valorObj.toString());
+        }
+        
+        // Extrai categoria (primeira categoria encontrada)
+        String categoriaMov = "Sem categoria";
+        if (categoriasMov != null && !categoriasMov.isEmpty()) {
+            Map<String, Object> primeiraCategoria = categoriasMov.get(0);
+            Object codCateg = primeiraCategoria.get("cCodCateg");
+            if (codCateg != null) {
+                categoriaMov = codCateg.toString();
+            }
+        } else if (detalhesMov.get("cCodCateg") != null) {
+            categoriaMov = detalhesMov.get("cCodCateg").toString();
+        }
+        
+        // Detecta tipo de movimentação (conta corrente vs título)
+        String grupo = (String) detalhesMov.getOrDefault("cGrupo", "");
+        boolean isContaCorrente = grupo.contains("CONTA_CORRENTE");
+        
+        // Para conta corrente, usa nCodMovCC como código; para títulos, usa nCodTitulo
+        Object codigoLancamento = isContaCorrente ? detalhesMov.get("nCodMovCC") : detalhesMov.get("nCodTitulo");
+        
+        // Para conta corrente, data de vencimento pode ser a data de pagamento ou null
+        Object dataVencimento = detalhesMov.get("dDtVenc");
+        if (dataVencimento == null && isContaCorrente) {
+            // Para conta corrente sem data de vencimento, usa data de pagamento como referência
+            dataVencimento = detalhesMov.get("dDtPagamento");
+        }
+        
+        // Constrói movimentação normalizada
+        Map<String, Object> movNormalizada = new HashMap<>();
+        movNormalizada.put("codigo_lancamento_omie", codigoLancamento != null ? codigoLancamento : 0);
+        movNormalizada.put("codigo_lancamento_integracao", detalhesMov.get("cCodIntTitulo"));
+        movNormalizada.put("numero_documento", detalhesMov.get("cNumTitulo"));
+        movNormalizada.put("data_emissao", detalhesMov.get("dDtEmissao"));
+        movNormalizada.put("data_vencimento", dataVencimento);
+        movNormalizada.put("data_previsao", detalhesMov.get("dDtPrevisao"));
+        movNormalizada.put("data_pagamento", detalhesMov.get("dDtPagamento"));
+        movNormalizada.put("data_registro", detalhesMov.get("dDtIncDe")); // Data de inclusão
+        movNormalizada.put("codigo_cliente_fornecedor", detalhesMov.get("nCodCliente"));
+        movNormalizada.put("cpf_cnpj_cliente", detalhesMov.get("cCPFCNPJCliente"));
+        movNormalizada.put("numero_pedido", detalhesMov.get("cNumOS"));
+        movNormalizada.put("status_titulo", detalhesMov.get("cStatus"));
+        movNormalizada.put("tipo_documento", detalhesMov.get("cTipo"));
+        movNormalizada.put("operacao", detalhesMov.get("cOperacao"));
+        movNormalizada.put("numero_documento_fiscal", detalhesMov.get("cNumDocFiscal"));
+        movNormalizada.put("codigo_barras", detalhesMov.get("cCodigoBarras"));
+        movNormalizada.put("codigo_vendedor", detalhesMov.get("nCodVendedor"));
+        movNormalizada.put("categoria", categoriaMov);
+        movNormalizada.put("codigo_categoria", categoriaMov);
+        // Usa o valor calculado (que já considera nValorMovCC para conta corrente)
+        movNormalizada.put("valor_documento", valor);
+        // Adiciona flag para identificar conta corrente
+        movNormalizada.put("is_conta_corrente", isContaCorrente);
+        movNormalizada.put("tipo", isDebito ? "DESPESA" : "RECEITA");
+        movNormalizada.put("debito", isDebito);
+        movNormalizada.put("natureza", natureza);
+        
+        // Adiciona informações do resumo
+        if (resumoMov != null) {
+            movNormalizada.put("valor_pago", resumoMov.get("nValPago"));
+            movNormalizada.put("valor_aberto", resumoMov.get("nValAberto"));
+            movNormalizada.put("valor_desconto", resumoMov.get("nDesconto"));
+            movNormalizada.put("valor_juros", resumoMov.get("nJuros"));
+            movNormalizada.put("valor_multa", resumoMov.get("nMulta"));
+            movNormalizada.put("valor_liquido", resumoMov.get("nValLiquido"));
+            movNormalizada.put("liquidado", resumoMov.get("cLiquidado"));
+        }
+        
+        // Adiciona categorias completas
+        movNormalizada.put("categorias", categoriasMov);
+        
+        // Adiciona departamentos se houver
+        movNormalizada.put("departamentos", movimento.get("departamentos"));
+        
+        // Preserva dados originais completos
+        movNormalizada.put("_detalhes", detalhesMov);
+        movNormalizada.put("_resumo", resumoMov);
+        movNormalizada.put("_movimento_completo", movimento);
+        
+        return movNormalizada;
+    }
+
+    /**
      * Pesquisa movimentações financeiras do OMIE usando o endpoint de Movimentos Financeiros
      * Documentação: https://app.omie.com.br/api/v1/financas/mf/
      * Usa o método ListarMovimentos que retorna Contas a Pagar, Contas a Receber e Lançamentos do Conta Corrente
@@ -699,174 +836,119 @@ public class OmieService {
             log.info("Pesquisando movimentações financeiras do OMIE (endpoint MF): dataInicio={}, dataFim={}, pagina={}, registrosPorPagina={}, tipo={}, categoria={}, textoPesquisa={}",
                     dataInicio, dataFim, pagina, registrosPorPagina, tipo, categoria, textoPesquisa);
 
-            // Constrói parâmetros para ListarMovimentos conforme documentação
-            // O mfListarRequest aceita apenas nPagina e nRegPorPagina diretamente
-            // Os filtros serão aplicados no backend após receber os dados
-            Map<String, Object> params = new HashMap<>();
-            
-            // Parâmetros obrigatórios de paginação (únicos suportados diretamente)
-            params.put("nPagina", pagina != null ? pagina : 1);
-            params.put("nRegPorPagina", registrosPorPagina != null ? Math.min(registrosPorPagina, 500) : 50);
-            
-            // Nota: Filtros de data, natureza e categoria serão aplicados no backend
-            // após receber os dados, pois o endpoint MF não suporta esses filtros diretamente
-            
-            log.debug("Parâmetros enviados para Omie ListarMovimentos: {}", params);
-            
-            // Chama o endpoint de Movimentos Financeiros
-            Map<String, Object> response = executarChamadaApi("/financas/mf/", "ListarMovimentos", params);
-            
-            log.debug("Resposta completa do Omie (MF): {}", response);
-            
-            // Processa a resposta conforme documentação mfListarResponse
-            List<Map<String, Object>> movimentos = new ArrayList<>();
-            Object movimentosObj = response.get("movimentos");
-            if (movimentosObj instanceof List) {
-                movimentos = (List<Map<String, Object>>) movimentosObj;
-            }
-            
-            // Extrai informações de paginação
-            Integer nPagina = (Integer) response.getOrDefault("nPagina", pagina != null ? pagina : 1);
-            Integer nTotPaginas = (Integer) response.getOrDefault("nTotPaginas", 1);
-            Integer nRegistros = (Integer) response.getOrDefault("nRegistros", movimentos.size());
-            Integer nTotRegistros = (Integer) response.getOrDefault("nTotRegistros", movimentos.size());
-            
-            log.info("Movimentações retornadas do OMIE (MF): {} registros (total: {}, página: {}/{})", 
-                    nRegistros, nTotRegistros, nPagina, nTotPaginas);
+            // Determina se precisa buscar todas as páginas para calcular totais corretos
+            // Se não há filtros de data e está pedindo muitos registros (cache), busca todas as páginas
+            boolean semFiltroData = (dataInicio == null || dataInicio.isEmpty()) && (dataFim == null || dataFim.isEmpty());
+            boolean pedindoCacheCompleto = registrosPorPagina != null && registrosPorPagina >= 500;
+            boolean precisaBuscarTodasPaginas = semFiltroData && pedindoCacheCompleto;
             
             // Normaliza movimentos para o formato esperado pelo frontend
             List<Map<String, Object>> movimentacoesNormalizadas = new ArrayList<>();
             double totalReceitas = 0.0;
             double totalDespesas = 0.0;
             
-            for (Map<String, Object> movimento : movimentos) {
-                Map<String, Object> detalhesMov = (Map<String, Object>) movimento.get("detalhes");
-                Map<String, Object> resumoMov = (Map<String, Object>) movimento.get("resumo");
-                List<Map<String, Object>> categoriasMov = (List<Map<String, Object>>) movimento.get("categorias");
+            Integer nPagina = pagina != null ? pagina : 1;
+            Integer nTotPaginas = 1;
+            Integer nTotRegistros = 0;
+            
+            if (precisaBuscarTodasPaginas) {
+                // Busca todas as páginas para calcular totais corretos
+                log.info("Buscando todas as páginas do OMIE para calcular totais corretos (sem filtros de data)");
+                int paginaAtual = 1;
+                int registrosPorPaginaOmie = 500; // Máximo permitido pelo OMIE
                 
-                if (detalhesMov == null) {
-                    continue;
-                }
-                
-                // Determina se é receita ou despesa
-                String natureza = (String) detalhesMov.getOrDefault("cNatureza", "");
-                boolean isDebito = "P".equals(natureza); // P = Contas a Pagar (despesa)
-                
-                // Extrai valores do resumo (prioriza valores do resumo)
-                Object valorObj = null;
-                if (resumoMov != null) {
-                    // Usa valor líquido do resumo (nValLiquido) ou valor em aberto (nValAberto)
-                    valorObj = resumoMov.get("nValLiquido");
-                    if (valorObj == null) {
-                        valorObj = resumoMov.get("nValAberto");
+                do {
+                    Map<String, Object> params = new HashMap<>();
+                    params.put("nPagina", paginaAtual);
+                    params.put("nRegPorPagina", registrosPorPaginaOmie);
+                    
+                    log.debug("Buscando página {} do OMIE", paginaAtual);
+                    Map<String, Object> response = executarChamadaApi("/financas/mf/", "ListarMovimentos", params);
+                    
+                    List<Map<String, Object>> movimentosPagina = new ArrayList<>();
+                    Object movimentosObj = response.get("movimentos");
+                    if (movimentosObj instanceof List) {
+                        movimentosPagina = (List<Map<String, Object>>) movimentosObj;
                     }
-                    if (valorObj == null) {
-                        valorObj = resumoMov.get("nValPago");
+                    
+                    // Atualiza informações de paginação na primeira página
+                    if (paginaAtual == 1) {
+                        nTotPaginas = (Integer) response.getOrDefault("nTotPaginas", 1);
+                        nTotRegistros = (Integer) response.getOrDefault("nTotRegistros", movimentosPagina.size());
                     }
-                }
-                
-                // Fallback para valor do título se resumo não tiver
-                if (valorObj == null) {
-                    valorObj = detalhesMov.get("nValorTitulo");
-                }
-                
-                // Para movimentações de conta corrente, usa nValorMovCC
-                if (valorObj == null) {
-                    valorObj = detalhesMov.get("nValorMovCC");
-                }
-                
-                double valor = 0.0;
-                                if (valorObj != null) {
-                    valor = valorObj instanceof Number ? 
-                                            ((Number) valorObj).doubleValue() : 
-                                            Double.parseDouble(valorObj.toString());
-                }
-                
-                // Acumula totais
-                if (isDebito) {
+                    
+                    // Processa movimentos desta página
+                    for (Map<String, Object> movimento : movimentosPagina) {
+                        Map<String, Object> movNormalizada = processarMovimento(movimento);
+                        if (movNormalizada != null) {
+                            movimentacoesNormalizadas.add(movNormalizada);
+                            // Acumula totais
+                            Object valorObj = movNormalizada.get("valor_documento");
+                            if (valorObj != null) {
+                                double valor = valorObj instanceof Number ? 
+                                        ((Number) valorObj).doubleValue() : 
+                                        Double.parseDouble(valorObj.toString());
+                                Boolean debito = (Boolean) movNormalizada.get("debito");
+                                if (Boolean.TRUE.equals(debito)) {
                                     totalDespesas += valor;
-                } else {
-                    totalReceitas += valor;
-                }
-                
-                // Extrai categoria (primeira categoria encontrada)
-                String categoriaMov = "Sem categoria";
-                if (categoriasMov != null && !categoriasMov.isEmpty()) {
-                    Map<String, Object> primeiraCategoria = categoriasMov.get(0);
-                    Object codCateg = primeiraCategoria.get("cCodCateg");
-                    if (codCateg != null) {
-                        categoriaMov = codCateg.toString();
+                                } else {
+                                    totalReceitas += valor;
+                                }
+                            }
+                        }
                     }
-                } else if (detalhesMov.get("cCodCateg") != null) {
-                    categoriaMov = detalhesMov.get("cCodCateg").toString();
+                    
+                    paginaAtual++;
+                } while (paginaAtual <= nTotPaginas && movimentacoesNormalizadas.size() < nTotRegistros);
+                
+                log.info("Todas as páginas buscadas: {} movimentações processadas (total: {})", 
+                        movimentacoesNormalizadas.size(), nTotRegistros);
+            } else {
+                // Busca apenas a página solicitada (comportamento normal)
+                Map<String, Object> params = new HashMap<>();
+                params.put("nPagina", nPagina);
+                params.put("nRegPorPagina", registrosPorPagina != null ? Math.min(registrosPorPagina, 500) : 50);
+                
+                log.debug("Parâmetros enviados para Omie ListarMovimentos: {}", params);
+                
+                Map<String, Object> response = executarChamadaApi("/financas/mf/", "ListarMovimentos", params);
+                
+                log.debug("Resposta completa do Omie (MF): {}", response);
+                
+                List<Map<String, Object>> movimentos = new ArrayList<>();
+                Object movimentosObj = response.get("movimentos");
+                if (movimentosObj instanceof List) {
+                    movimentos = (List<Map<String, Object>>) movimentosObj;
                 }
                 
-                // Detecta tipo de movimentação (conta corrente vs título)
-                String grupo = (String) detalhesMov.getOrDefault("cGrupo", "");
-                boolean isContaCorrente = grupo.contains("CONTA_CORRENTE");
+                // Extrai informações de paginação
+                nPagina = (Integer) response.getOrDefault("nPagina", nPagina);
+                nTotPaginas = (Integer) response.getOrDefault("nTotPaginas", 1);
+                nTotRegistros = (Integer) response.getOrDefault("nTotRegistros", movimentos.size());
                 
-                // Para conta corrente, usa nCodMovCC como código; para títulos, usa nCodTitulo
-                Object codigoLancamento = isContaCorrente ? detalhesMov.get("nCodMovCC") : detalhesMov.get("nCodTitulo");
+                log.info("Movimentações retornadas do OMIE (MF): {} registros (total: {}, página: {}/{})", 
+                        movimentos.size(), nTotRegistros, nPagina, nTotPaginas);
                 
-                // Para conta corrente, data de vencimento pode ser a data de pagamento ou null
-                Object dataVencimento = detalhesMov.get("dDtVenc");
-                if (dataVencimento == null && isContaCorrente) {
-                    // Para conta corrente sem data de vencimento, usa data de pagamento como referência
-                    dataVencimento = detalhesMov.get("dDtPagamento");
+                // Processa movimentos da página atual
+                for (Map<String, Object> movimento : movimentos) {
+                    Map<String, Object> movNormalizada = processarMovimento(movimento);
+                    if (movNormalizada != null) {
+                        movimentacoesNormalizadas.add(movNormalizada);
+                        // Acumula totais
+                        Object valorObj = movNormalizada.get("valor_documento");
+                        if (valorObj != null) {
+                            double valor = valorObj instanceof Number ? 
+                                    ((Number) valorObj).doubleValue() : 
+                                    Double.parseDouble(valorObj.toString());
+                            Boolean debito = (Boolean) movNormalizada.get("debito");
+                            if (Boolean.TRUE.equals(debito)) {
+                                totalDespesas += valor;
+                            } else {
+                                totalReceitas += valor;
+                            }
+                        }
+                    }
                 }
-                
-                // Constrói movimentação normalizada
-                Map<String, Object> movNormalizada = new HashMap<>();
-                movNormalizada.put("codigo_lancamento_omie", codigoLancamento != null ? codigoLancamento : 0);
-                movNormalizada.put("codigo_lancamento_integracao", detalhesMov.get("cCodIntTitulo"));
-                movNormalizada.put("numero_documento", detalhesMov.get("cNumTitulo"));
-                movNormalizada.put("data_emissao", detalhesMov.get("dDtEmissao"));
-                movNormalizada.put("data_vencimento", dataVencimento);
-                movNormalizada.put("data_previsao", detalhesMov.get("dDtPrevisao"));
-                movNormalizada.put("data_pagamento", detalhesMov.get("dDtPagamento"));
-                movNormalizada.put("data_registro", detalhesMov.get("dDtIncDe")); // Data de inclusão
-                movNormalizada.put("codigo_cliente_fornecedor", detalhesMov.get("nCodCliente"));
-                movNormalizada.put("cpf_cnpj_cliente", detalhesMov.get("cCPFCNPJCliente"));
-                movNormalizada.put("numero_pedido", detalhesMov.get("cNumOS"));
-                movNormalizada.put("status_titulo", detalhesMov.get("cStatus"));
-                movNormalizada.put("tipo_documento", detalhesMov.get("cTipo"));
-                movNormalizada.put("operacao", detalhesMov.get("cOperacao"));
-                movNormalizada.put("numero_documento_fiscal", detalhesMov.get("cNumDocFiscal"));
-                movNormalizada.put("codigo_barras", detalhesMov.get("cCodigoBarras"));
-                movNormalizada.put("codigo_vendedor", detalhesMov.get("nCodVendedor"));
-                movNormalizada.put("categoria", categoriaMov);
-                movNormalizada.put("codigo_categoria", categoriaMov);
-                // Usa o valor calculado (que já considera nValorMovCC para conta corrente)
-                movNormalizada.put("valor_documento", valor);
-                // Adiciona flag para identificar conta corrente
-                movNormalizada.put("is_conta_corrente", isContaCorrente);
-                movNormalizada.put("tipo", isDebito ? "DESPESA" : "RECEITA");
-                movNormalizada.put("debito", isDebito);
-                movNormalizada.put("natureza", natureza);
-                
-                // Adiciona informações do resumo
-                if (resumoMov != null) {
-                    movNormalizada.put("valor_pago", resumoMov.get("nValPago"));
-                    movNormalizada.put("valor_aberto", resumoMov.get("nValAberto"));
-                    movNormalizada.put("valor_desconto", resumoMov.get("nDesconto"));
-                    movNormalizada.put("valor_juros", resumoMov.get("nJuros"));
-                    movNormalizada.put("valor_multa", resumoMov.get("nMulta"));
-                    movNormalizada.put("valor_liquido", resumoMov.get("nValLiquido"));
-                    movNormalizada.put("liquidado", resumoMov.get("cLiquidado"));
-                }
-                
-                // Adiciona categorias completas
-                movNormalizada.put("categorias", categoriasMov);
-                
-                // Adiciona departamentos se houver
-                movNormalizada.put("departamentos", movimento.get("departamentos"));
-                
-                // Preserva dados originais completos
-                movNormalizada.put("_detalhes", detalhesMov);
-                movNormalizada.put("_resumo", resumoMov);
-                movNormalizada.put("_movimento_completo", movimento);
-                
-                movimentacoesNormalizadas.add(movNormalizada);
             }
             
             // Enriquece movimentações com nomes de clientes/fornecedores
@@ -1026,21 +1108,47 @@ public class OmieService {
             }
             log.info("Movimentações com nome de cliente/fornecedor: {} de {}", movimentacoesComNome, movimentacoesFiltradas.size());
             
+            // Aplica paginação nas movimentações filtradas antes de retornar
+            List<Map<String, Object>> movimentacoesPaginadas = movimentacoesFiltradas;
+            int registrosPorPaginaFinal = registrosPorPagina != null ? registrosPorPagina : 50;
+            int totalMovimentacoesFiltradas = movimentacoesFiltradas.size();
+            
+            if (pagina != null && pagina > 0 && registrosPorPaginaFinal > 0) {
+                int inicio = (pagina - 1) * registrosPorPaginaFinal;
+                int fim = inicio + registrosPorPaginaFinal;
+                if (inicio < movimentacoesFiltradas.size()) {
+                    movimentacoesPaginadas = movimentacoesFiltradas.subList(
+                        inicio, Math.min(fim, movimentacoesFiltradas.size()));
+                } else {
+                    movimentacoesPaginadas = new ArrayList<>();
+                }
+            }
+            
+            // Determina o total a retornar:
+            // - Se há filtros aplicados, retorna o total das movimentações filtradas
+            // - Se não há filtros, retorna o total geral do OMIE (nTotRegistros)
+            int totalRetornar = temFiltros ? totalMovimentacoesFiltradas : nTotRegistros;
+            
+            // Calcula total de páginas baseado no total retornado
+            int totalPaginasRetornar = temFiltros 
+                ? (int) Math.ceil((double) totalMovimentacoesFiltradas / registrosPorPaginaFinal)
+                : nTotPaginas;
+            
             // Constrói resultado final
             Map<String, Object> resultado = new HashMap<>();
-            resultado.put("movimentacoes", movimentacoesFiltradas);
-            resultado.put("total", nTotRegistros);
+            resultado.put("movimentacoes", movimentacoesPaginadas);
+            resultado.put("total", totalRetornar);
             resultado.put("totalReceitas", totalReceitas);
             resultado.put("totalDespesas", totalDespesas);
             resultado.put("saldoLiquido", totalReceitas - totalDespesas);
             resultado.put("pagina", nPagina);
-            resultado.put("totalPaginas", nTotPaginas);
+            resultado.put("totalPaginas", totalPaginasRetornar);
             resultado.put("registrosPorPagina", registrosPorPagina);
             resultado.put("dataInicio", dataInicio);
             resultado.put("dataFim", dataFim);
             
-            log.info("Movimentações retornadas (MF): {} registros (total: {}), Receitas: {}, Despesas: {}, Saldo: {}", 
-                    movimentacoesFiltradas.size(), nTotRegistros, totalReceitas, totalDespesas, totalReceitas - totalDespesas);
+            log.info("Movimentações retornadas (MF): {} registros na página (total: {}, filtros: {}), Receitas: {}, Despesas: {}, Saldo: {}", 
+                    movimentacoesPaginadas.size(), totalRetornar, temFiltros ? "sim" : "não", totalReceitas, totalDespesas, totalReceitas - totalDespesas);
             
             return resultado;
         } catch (Exception e) {

@@ -56,6 +56,8 @@ public class UsuarioService {
                 .senha(passwordEncoder.encode(request.getSenha()))
                 .role(request.getRole())
                 .status(Usuario.StatusUsuario.ATIVO)
+                .omieAppKey(request.getOmieAppKey())
+                .omieAppSecret(request.getOmieAppSecret())
                 .build();
 
         // Criar permissões padrão baseadas no role
@@ -192,6 +194,12 @@ public class UsuarioService {
         }
         if (request.getStatus() != null) {
             usuario.setStatus(request.getStatus());
+        }
+        if (request.getOmieAppKey() != null) {
+            usuario.setOmieAppKey(request.getOmieAppKey());
+        }
+        if (request.getOmieAppSecret() != null) {
+            usuario.setOmieAppSecret(request.getOmieAppSecret());
         }
 
         usuario = usuarioRepository.save(usuario);

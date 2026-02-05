@@ -176,5 +176,39 @@ public class OmieController {
             ));
         }
     }
+
+    /**
+     * Retorna movimentações agrupadas por ano de emissão
+     * Similar ao relatório do OMIE que mostra totais por ano
+     * 
+     * @param idEmpresa ID da empresa (opcional)
+     * @param tipo Filtro por tipo: 'receita' ou 'despesa' (opcional)
+     * @param categoria Filtro por categoria (opcional)
+     * @param textoPesquisa Filtro por texto (opcional)
+     */
+    @GetMapping("/movimentacoes/agrupadas-por-ano")
+    @PreAuthorize("hasPermission(null, 'FINANCEIRO')")
+    public ResponseEntity<Map<String, Object>> pesquisarMovimentacoesAgrupadasPorAno(
+            @RequestParam(required = false) String idEmpresa,
+            @RequestParam(required = false) String tipo,
+            @RequestParam(required = false) String categoria,
+            @RequestParam(required = false) String textoPesquisa) {
+        
+        log.info("Pesquisando movimentações agrupadas por ano do OMIE: empresa={}, tipo={}, categoria={}, textoPesquisa={}",
+                idEmpresa, tipo, categoria, textoPesquisa);
+        
+        try {
+            Map<String, Object> resultado = omieService.pesquisarMovimentacoesAgrupadasPorAno(
+                    idEmpresa, tipo, categoria, textoPesquisa);
+            
+            return ResponseEntity.ok(resultado);
+        } catch (Exception e) {
+            log.error("Erro ao pesquisar movimentações agrupadas por ano", e);
+            return ResponseEntity.status(500).body(Map.of(
+                    "erro", true,
+                    "mensagem", "Erro ao pesquisar movimentações agrupadas por ano: " + e.getMessage()
+            ));
+        }
+    }
 }
 

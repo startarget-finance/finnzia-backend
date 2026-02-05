@@ -36,6 +36,11 @@ public class UsuarioDTO {
     
     private LocalDateTime dataCriacao;
     private Map<String, Boolean> permissions;
+    
+    @JsonProperty("omieAppKey")
+    private String omieAppKey;
+    
+    // Nota: omieAppSecret não é incluído no DTO por segurança
 
     /**
      * Converte entidade Usuario para DTO
@@ -63,6 +68,7 @@ public class UsuarioDTO {
                 .ultimoAcesso(usuario.getUltimoAcesso())
                 .dataCriacao(usuario.getDataCriacao())
                 .permissions(permissionsMap)
+                .omieAppKey(usuario.getOmieAppKey())
                 .build();
     }
 

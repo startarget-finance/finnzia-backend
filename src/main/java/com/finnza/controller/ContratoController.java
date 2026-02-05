@@ -83,16 +83,22 @@ public class ContratoController {
     }
 
     /**
-     * Busca contratos com filtros
+     * Busca contratos com filtros (igual ao Asaas)
      */
     @GetMapping("/filtros")
     @PreAuthorize("hasPermission(null, 'CONTRATOS')")
     public ResponseEntity<Page<ContratoDTO>> buscarComFiltros(
             @RequestParam(required = false) Long clienteId,
-            @RequestParam(required = false) Contrato.StatusContrato status,
+            @RequestParam(required = false) String status,
             @RequestParam(required = false) String termo,
+            @RequestParam(required = false) String billingType,
+            @RequestParam(required = false) String dueDateGe,
+            @RequestParam(required = false) String dueDateLe,
+            @RequestParam(required = false) String paymentDateGe,
+            @RequestParam(required = false) String paymentDateLe,
             @PageableDefault(size = 10) Pageable pageable) {
-        Page<ContratoDTO> contratos = contratoService.buscarComFiltros(clienteId, status, termo, pageable);
+        Page<ContratoDTO> contratos = contratoService.buscarComFiltros(
+                clienteId, status, termo, billingType, dueDateGe, dueDateLe, paymentDateGe, paymentDateLe, pageable);
         return ResponseEntity.ok(contratos);
     }
 
@@ -128,6 +134,16 @@ public class ContratoController {
         response.put("contratosImportados", contratosImportados);
         response.put("mensagem", String.format("%d contratos importados com sucesso do Asaas", contratosImportados));
         return ResponseEntity.ok(response);
+    }
+
+    /**
+     * Retorna totais por categoria de contratos
+     */
+    @GetMapping("/totais-categorias")
+    @PreAuthorize("hasPermission(null, 'CONTRATOS')")
+    public ResponseEntity<Map<String, Object>> getTotaisPorCategoria() {
+        Map<String, Object> totais = contratoService.getTotaisPorCategoria();
+        return ResponseEntity.ok(totais);
     }
 }
 

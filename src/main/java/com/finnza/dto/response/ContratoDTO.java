@@ -37,8 +37,18 @@ public class ContratoDTO {
     private String whatsapp;
     private String asaasSubscriptionId;
     private List<CobrancaDTO> cobrancas;
+    private CategoriaContrato categoria;
     private LocalDateTime dataCriacao;
     private LocalDateTime dataAtualizacao;
+    
+    /**
+     * Enum para categoria do contrato (mutuamente exclusivo)
+     */
+    public enum CategoriaContrato {
+        EM_DIA,
+        PENDENTE,
+        INADIMPLENTE
+    }
 
     @Data
     @Builder

@@ -26,5 +26,11 @@ public class AtualizarUsuarioRequest {
     private Usuario.Role role;
     
     private Usuario.StatusUsuario status;
+
+    @Size(max = 100, message = "OMIE App Key deve ter no máximo 100 caracteres")
+    private String omieAppKey;
+
+    @Size(max = 200, message = "OMIE App Secret deve ter no máximo 200 caracteres")
+    private String omieAppSecret;
 }
 

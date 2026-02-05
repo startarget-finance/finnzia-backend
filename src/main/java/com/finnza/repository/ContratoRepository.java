@@ -23,6 +23,12 @@ public interface ContratoRepository extends JpaRepository<Contrato, Long> {
      */
     @Query("SELECT c FROM Contrato c WHERE c.deleted = false")
     Page<Contrato> findAllNaoDeletados(Pageable pageable);
+    
+    /**
+     * Lista todos os contratos não deletados (sem paginação)
+     */
+    @Query("SELECT c FROM Contrato c WHERE c.deleted = false")
+    List<Contrato> findAllNaoDeletados();
 
     /**
      * Busca contratos por cliente (não deletados)
@@ -49,22 +55,17 @@ public interface ContratoRepository extends JpaRepository<Contrato, Long> {
     Optional<Contrato> findByAsaasSubscriptionId(@Param("asaasSubscriptionId") String asaasSubscriptionId);
 
     /**
-     * Busca contratos com filtros
+     * Busca contratos com filtros básicos (título, cliente, termo)
      */
-    @Query(value = "SELECT * FROM contratos c WHERE " +
-           "(:clienteId IS NULL OR c.cliente_id = :clienteId) AND " +
-           "(:status IS NULL OR c.status = CAST(:status AS VARCHAR)) AND " +
-           "(:termo IS NULL OR :termo = '' OR c.titulo LIKE '%' || CAST(:termo AS VARCHAR) || '%') AND " +
-           "c.deleted = false",
-           countQuery = "SELECT COUNT(*) FROM contratos c WHERE " +
-           "(:clienteId IS NULL OR c.cliente_id = :clienteId) AND " +
-           "(:status IS NULL OR c.status = CAST(:status AS VARCHAR)) AND " +
-           "(:termo IS NULL OR :termo = '' OR c.titulo LIKE '%' || CAST(:termo AS VARCHAR) || '%') AND " +
-           "c.deleted = false",
-           nativeQuery = true)
+    @Query("SELECT c FROM Contrato c JOIN c.cliente cl WHERE " +
+           "(:clienteId IS NULL OR c.cliente.id = :clienteId) AND " +
+           "(:termo IS NULL OR :termo = '' OR " +
+           "LOWER(c.titulo) LIKE LOWER(CONCAT('%', :termo, '%')) OR " +
+           "LOWER(cl.razaoSocial) LIKE LOWER(CONCAT('%', :termo, '%')) OR " +
+           "(cl.nomeFantasia IS NOT NULL AND LOWER(cl.nomeFantasia) LIKE LOWER(CONCAT('%', :termo, '%')))) AND " +
+           "c.deleted = false")
     Page<Contrato> buscarComFiltros(
             @Param("clienteId") Long clienteId,
-            @Param("status") String status,
             @Param("termo") String termo,
             Pageable pageable);
 }

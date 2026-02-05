@@ -1,6 +1,7 @@
 package com.finnza.service;
 
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
@@ -35,10 +36,13 @@ import java.util.stream.Collectors;
 public class OmieService {
 
     private final WebClient webClient;
-    private final String appKey;
-    private final String appSecret;
+    private final String appKey; // Credenciais padrão (fallback)
+    private final String appSecret; // Credenciais padrão (fallback)
     private final String baseUrl;
     private final boolean mockEnabled;
+    
+    @Autowired(required = false)
+    private PermissionService permissionService;
     
     // Cache de totais calculados (chave: dataInicio_dataFim, valor: TotaisCache)
     private final Map<String, TotaisCache> cacheTotais = new ConcurrentHashMap<>();
@@ -147,14 +151,15 @@ public class OmieService {
 
             log.info("Testando conexão com OMIE - enviando requisição JSON para ListarClientes");
             
-            Map<String, Object> response = executarChamadaApi("/geral/clientes/", "ListarClientes", params);
+            String[] credenciais = obterCredenciais();
+            Map<String, Object> response = executarChamadaApiComCredenciais("/geral/clientes/", "ListarClientes", params, credenciais[0], credenciais[1]);
 
             log.info("Conexão com OMIE testada com sucesso");
             return Map.of(
                     "status", "success",
                     "message", "Conexão estabelecida com sucesso",
-                    "appKeyConfigurada", appKey != null && !appKey.isEmpty(),
-                    "appSecretConfigurada", appSecret != null && !appSecret.isEmpty(),
+                    "appKeyConfigurada", credenciais[0] != null && !credenciais[0].isEmpty(),
+                    "appSecretConfigurada", credenciais[1] != null && !credenciais[1].isEmpty(),
                     "urlBase", baseUrl,
                     "total_de_registros", response.getOrDefault("total_de_registros", 0),
                     "resposta", response
@@ -196,18 +201,19 @@ public class OmieService {
                     "detalhes", responseBody != null && responseBody.length() > 500 
                         ? responseBody.substring(0, 500) + "..." 
                         : responseBody,
-                    "appKeyConfigurada", appKey != null && !appKey.isEmpty(),
-                    "appSecretConfigurada", appSecret != null && !appSecret.isEmpty(),
+                    "appKeyConfigurada", true,
+                    "appSecretConfigurada", true,
                     "urlBase", baseUrl
             );
         } catch (Exception e) {
             log.error("Erro ao testar conexão com OMIE", e);
+            String[] credenciais = obterCredenciais();
             return Map.of(
                     "status", "error",
                     "message", "Erro ao testar conexão: " + e.getMessage(),
                     "erroTipo", e.getClass().getSimpleName(),
-                    "appKeyConfigurada", appKey != null && !appKey.isEmpty(),
-                    "appSecretConfigurada", appSecret != null && !appSecret.isEmpty(),
+                    "appKeyConfigurada", credenciais[0] != null && !credenciais[0].isEmpty(),
+                    "appSecretConfigurada", credenciais[1] != null && !credenciais[1].isEmpty(),
                     "urlBase", baseUrl
             );
         }
@@ -246,9 +252,27 @@ public class OmieService {
     }
 
     /**
+     * Obtém as credenciais OMIE do usuário logado ou usa as credenciais padrão
+     * @return Array com [appKey, appSecret]
+     */
+    private String[] obterCredenciais() {
+        if (permissionService != null) {
+            com.finnza.domain.entity.Usuario usuario = permissionService.getCurrentUser();
+            if (usuario != null && usuario.getOmieAppKey() != null && !usuario.getOmieAppKey().isEmpty()
+                && usuario.getOmieAppSecret() != null && !usuario.getOmieAppSecret().isEmpty()) {
+                log.debug("Usando credenciais OMIE do usuário logado: {}", usuario.getEmail());
+                return new String[]{usuario.getOmieAppKey(), usuario.getOmieAppSecret()};
+            }
+        }
+        // Fallback para credenciais padrão (variáveis de ambiente)
+        log.debug("Usando credenciais OMIE padrão (variáveis de ambiente)");
+        return new String[]{appKey, appSecret};
+    }
+
+    /**
      * Cria o corpo da requisição JSON para API OMIE
      */
-    private Map<String, Object> criarRequestBody(String call, Map<String, Object> params) {
+    private Map<String, Object> criarRequestBody(String call, Map<String, Object> params, String appKey, String appSecret) {
         Map<String, Object> requestBody = new HashMap<>();
         requestBody.put("call", call);
         requestBody.put("app_key", appKey);
@@ -268,9 +292,14 @@ public class OmieService {
 
     /**
      * Gera chave única para cache de requisições
+     * Inclui hash das credenciais para evitar cache entre usuários diferentes
      */
-    private String gerarChaveCache(String endpoint, String call, Map<String, Object> params) {
-        return endpoint + "|" + call + "|" + params.toString();
+    private String gerarChaveCache(String endpoint, String call, Map<String, Object> params, String appKey) {
+        // Usa apenas parte da appKey para identificar usuário sem expor credencial completa
+        String userHash = appKey != null && appKey.length() > 10 
+            ? appKey.substring(0, 5) + appKey.substring(appKey.length() - 5)
+            : "default";
+        return endpoint + "|" + call + "|" + params.toString() + "|user:" + userHash;
     }
     
     /**
@@ -278,7 +307,17 @@ public class OmieService {
      */
     @SuppressWarnings("unchecked")
     private Map<String, Object> executarChamadaApi(String endpoint, String call, Map<String, Object> params) {
-        String cacheKey = gerarChaveCache(endpoint, call, params);
+        String[] credenciais = obterCredenciais();
+        return executarChamadaApiComCredenciais(endpoint, call, params, credenciais[0], credenciais[1]);
+    }
+    
+    /**
+     * Executa uma chamada à API OMIE com credenciais específicas
+     */
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> executarChamadaApiComCredenciais(String endpoint, String call, 
+                                                                 Map<String, Object> params, String appKey, String appSecret) {
+        String cacheKey = gerarChaveCache(endpoint, call, params, appKey);
         
         // Verifica cache recente (últimos 5 segundos para evitar consumo redundante)
         ResponseCache cached = cacheRequisicoes.get(cacheKey);
@@ -300,7 +339,8 @@ public class OmieService {
                     return new HashMap<>(cached.response);
                 }
                 
-                return executarChamadaApiComRetry(endpoint, call, params, cacheKey);
+                // Executa chamada com retry, usando as mesmas credenciais utilizadas para montar o cacheKey
+                return executarChamadaApiComRetry(endpoint, call, params, cacheKey, appKey, appSecret);
             } finally {
                 // Remove lock após 10 segundos para evitar acúmulo de locks
                 locksRequisicoes.remove(cacheKey);
@@ -313,8 +353,9 @@ public class OmieService {
      */
     @SuppressWarnings("unchecked")
     private Map<String, Object> executarChamadaApiComRetry(String endpoint, String call, 
-                                                           Map<String, Object> params, String cacheKey) {
-        Map<String, Object> requestBody = criarRequestBody(call, params);
+                                                           Map<String, Object> params, String cacheKey, 
+                                                           String appKey, String appSecret) {
+        Map<String, Object> requestBody = criarRequestBody(call, params, appKey, appSecret);
         
         // Log do request body (sem app_secret por segurança)
         Map<String, Object> logBody = new HashMap<>(requestBody);
@@ -325,20 +366,20 @@ public class OmieService {
         int retryDelaySeconds = 6; // Aguarda 6 segundos (um pouco mais que os 5 recomendados)
         
         for (int attempt = 0; attempt <= maxRetries; attempt++) {
-            try {
-                Map<String, Object> response = webClient.post()
-                        .uri(endpoint)
-                        .bodyValue(requestBody)
-                        .retrieve()
-                        .bodyToMono(Map.class)
-                        .block();
+        try {
+            Map<String, Object> response = webClient.post()
+                    .uri(endpoint)
+                    .bodyValue(requestBody)
+                    .retrieve()
+                    .bodyToMono(Map.class)
+                    .block();
 
-                // Verifica se há erro na resposta
-                if (response != null && response.containsKey("faultstring")) {
-                    String erro = (String) response.get("faultstring");
-                    log.error("Erro retornado pela API OMIE: {}", erro);
-                    throw new RuntimeException("Erro na API OMIE: " + erro);
-                }
+            // Verifica se há erro na resposta
+            if (response != null && response.containsKey("faultstring")) {
+                String erro = (String) response.get("faultstring");
+                log.error("Erro retornado pela API OMIE: {}", erro);
+                throw new RuntimeException("Erro na API OMIE: " + erro);
+            }
 
                 Map<String, Object> finalResponse = response != null ? response : new HashMap<>();
                 
@@ -346,8 +387,8 @@ public class OmieService {
                 cacheRequisicoes.put(cacheKey, new ResponseCache(finalResponse));
                 
                 return finalResponse;
-            } catch (WebClientResponseException e) {
-                String responseBody = e.getResponseBodyAsString();
+        } catch (WebClientResponseException e) {
+            String responseBody = e.getResponseBodyAsString();
                 
                 // Tratamento especial para consumo redundante (500 com mensagem específica)
                 if (e.getStatusCode().value() == 500 && 
@@ -382,68 +423,68 @@ public class OmieService {
                         throw new RuntimeException(mensagemErro, e);
                     }
                 }
-                
-                // Tratamento especial para rate limiting (425 TOO_EARLY)
-                if (e.getStatusCode().value() == 425) {
-                    String mensagemRateLimit = "API OMIE temporariamente bloqueada por excesso de requisições. ";
-                    if (responseBody != null && responseBody.contains("segundos")) {
-                        try {
-                            // Tenta extrair o número de segundos da mensagem
-                            int inicio = responseBody.indexOf("em ") + 3;
-                            int fim = responseBody.indexOf(" segundos", inicio);
-                            if (fim > inicio) {
-                                String segundos = responseBody.substring(inicio, fim);
-                                mensagemRateLimit += "Tente novamente em " + segundos + " segundos.";
-                            } else {
-                                mensagemRateLimit += "Aguarde alguns minutos antes de tentar novamente.";
-                            }
-                        } catch (Exception ex) {
+            
+            // Tratamento especial para rate limiting (425 TOO_EARLY)
+            if (e.getStatusCode().value() == 425) {
+                String mensagemRateLimit = "API OMIE temporariamente bloqueada por excesso de requisições. ";
+                if (responseBody != null && responseBody.contains("segundos")) {
+                    try {
+                        // Tenta extrair o número de segundos da mensagem
+                        int inicio = responseBody.indexOf("em ") + 3;
+                        int fim = responseBody.indexOf(" segundos", inicio);
+                        if (fim > inicio) {
+                            String segundos = responseBody.substring(inicio, fim);
+                            mensagemRateLimit += "Tente novamente em " + segundos + " segundos.";
+                        } else {
                             mensagemRateLimit += "Aguarde alguns minutos antes de tentar novamente.";
                         }
-                    } else {
+                    } catch (Exception ex) {
                         mensagemRateLimit += "Aguarde alguns minutos antes de tentar novamente.";
                     }
-                    
-                    log.warn("Rate limit da API OMIE atingido: {}", mensagemRateLimit);
-                    throw new RuntimeException(mensagemRateLimit, e);
+                } else {
+                    mensagemRateLimit += "Aguarde alguns minutos antes de tentar novamente.";
                 }
                 
-                // Extrai mensagem de erro da resposta
-                String mensagemErro = "Erro ao chamar API OMIE: " + e.getStatusCode();
-                if (responseBody != null && !responseBody.isEmpty()) {
-                    if (responseBody.contains("faultstring")) {
-                        try {
-                            int inicio = responseBody.indexOf("\"faultstring\":\"") + 15;
-                            int fim = responseBody.indexOf("\"", inicio);
-                            if (fim > inicio) {
-                                mensagemErro = responseBody.substring(inicio, fim);
-                            }
-                        } catch (Exception ex) {
-                            // Ignora erro ao extrair
+                log.warn("Rate limit da API OMIE atingido: {}", mensagemRateLimit);
+                throw new RuntimeException(mensagemRateLimit, e);
+            }
+            
+            // Extrai mensagem de erro da resposta
+            String mensagemErro = "Erro ao chamar API OMIE: " + e.getStatusCode();
+            if (responseBody != null && !responseBody.isEmpty()) {
+                if (responseBody.contains("faultstring")) {
+                    try {
+                        int inicio = responseBody.indexOf("\"faultstring\":\"") + 15;
+                        int fim = responseBody.indexOf("\"", inicio);
+                        if (fim > inicio) {
+                            mensagemErro = responseBody.substring(inicio, fim);
                         }
-                    } else if (responseBody.contains("message")) {
-                        try {
-                            int inicio = responseBody.indexOf("\"message\":\"") + 11;
-                            int fim = responseBody.indexOf("\"", inicio);
-                            if (fim > inicio) {
-                                mensagemErro = responseBody.substring(inicio, fim);
-                            }
-                        } catch (Exception ex) {
-                            // Ignora erro ao extrair
+                    } catch (Exception ex) {
+                        // Ignora erro ao extrair
+                    }
+                } else if (responseBody.contains("message")) {
+                    try {
+                        int inicio = responseBody.indexOf("\"message\":\"") + 11;
+                        int fim = responseBody.indexOf("\"", inicio);
+                        if (fim > inicio) {
+                            mensagemErro = responseBody.substring(inicio, fim);
                         }
+                    } catch (Exception ex) {
+                        // Ignora erro ao extrair
                     }
                 }
-                
-                log.error("Erro HTTP ao chamar API OMIE ({}): {} - {}", 
-                        endpoint, e.getStatusCode(), responseBody);
-                throw new RuntimeException(mensagemErro, e);
-            } catch (Exception e) {
+            }
+            
+            log.error("Erro HTTP ao chamar API OMIE ({}): {} - {}", 
+                    endpoint, e.getStatusCode(), responseBody);
+            throw new RuntimeException(mensagemErro, e);
+        } catch (Exception e) {
                 if (e instanceof RuntimeException && e.getMessage() != null && e.getMessage().contains("Consumo redundante")) {
                     throw e; // Re-lança erros de consumo redundante sem retry adicional
                 }
-                log.error("Erro inesperado ao chamar API OMIE", e);
-                throw new RuntimeException("Erro ao chamar API OMIE: " + e.getMessage(), e);
-            }
+            log.error("Erro inesperado ao chamar API OMIE", e);
+            throw new RuntimeException("Erro ao chamar API OMIE: " + e.getMessage(), e);
+        }
         }
         
         throw new RuntimeException("Erro ao chamar API OMIE após " + (maxRetries + 1) + " tentativas");
@@ -837,10 +878,14 @@ public class OmieService {
                     dataInicio, dataFim, pagina, registrosPorPagina, tipo, categoria, textoPesquisa);
 
             // Determina se precisa buscar todas as páginas para calcular totais corretos
-            // Se não há filtros de data e está pedindo muitos registros (cache), busca todas as páginas
+            // Se não há filtros de data, sempre busca todas as páginas para calcular totais gerais corretos
+            // Isso garante que os totais sejam sempre consistentes, independente da página solicitada
             boolean semFiltroData = (dataInicio == null || dataInicio.isEmpty()) && (dataFim == null || dataFim.isEmpty());
-            boolean pedindoCacheCompleto = registrosPorPagina != null && registrosPorPagina >= 500;
-            boolean precisaBuscarTodasPaginas = semFiltroData && pedindoCacheCompleto;
+            boolean semFiltrosUI = (tipo == null || tipo.isEmpty()) && 
+                                  (categoria == null || categoria.isEmpty()) && 
+                                  (textoPesquisa == null || textoPesquisa.trim().isEmpty());
+            // Busca todas as páginas se não há filtros de data E não há filtros de UI (para calcular totais gerais)
+            boolean precisaBuscarTodasPaginas = semFiltroData && semFiltrosUI;
             
             // Normaliza movimentos para o formato esperado pelo frontend
             List<Map<String, Object>> movimentacoesNormalizadas = new ArrayList<>();
@@ -936,13 +981,13 @@ public class OmieService {
                         movimentacoesNormalizadas.add(movNormalizada);
                         // Acumula totais
                         Object valorObj = movNormalizada.get("valor_documento");
-                        if (valorObj != null) {
-                            double valor = valorObj instanceof Number ? 
-                                    ((Number) valorObj).doubleValue() : 
-                                    Double.parseDouble(valorObj.toString());
+                                if (valorObj != null) {
+                                    double valor = valorObj instanceof Number ? 
+                                            ((Number) valorObj).doubleValue() : 
+                                            Double.parseDouble(valorObj.toString());
                             Boolean debito = (Boolean) movNormalizada.get("debito");
                             if (Boolean.TRUE.equals(debito)) {
-                                totalDespesas += valor;
+                                    totalDespesas += valor;
                             } else {
                                 totalReceitas += valor;
                             }
@@ -969,26 +1014,70 @@ public class OmieService {
                     if (dataInicio != null && !dataInicio.isEmpty()) {
                         String[] partes = dataInicio.split("-");
                         if (partes.length == 3) {
-                            dataInicioStr = partes[2] + "/" + partes[1] + "/" + partes[0];
+                            // Garante formato DD/MM/YYYY com zeros à esquerda
+                            String dia = partes[2].length() == 1 ? "0" + partes[2] : partes[2];
+                            String mes = partes[1].length() == 1 ? "0" + partes[1] : partes[1];
+                            dataInicioStr = dia + "/" + mes + "/" + partes[0];
                         }
                     }
                     
                     if (dataFim != null && !dataFim.isEmpty()) {
                         String[] partes = dataFim.split("-");
                         if (partes.length == 3) {
-                            dataFimStr = partes[2] + "/" + partes[1] + "/" + partes[0];
+                            // Garante formato DD/MM/YYYY com zeros à esquerda
+                            String dia = partes[2].length() == 1 ? "0" + partes[2] : partes[2];
+                            String mes = partes[1].length() == 1 ? "0" + partes[1] : partes[1];
+                            dataFimStr = dia + "/" + mes + "/" + partes[0];
                         }
                     }
+                    
+                    log.debug("Filtro de data: dataInicio={}, dataFim={}, dataInicioStr={}, dataFimStr={}", 
+                            dataInicio, dataFim, dataInicioStr, dataFimStr);
                     
                     final String dataInicioFinal = dataInicioStr;
                     final String dataFimFinal = dataFimStr;
                     
                     movimentacoesFiltradas = movimentacoesFiltradas.stream()
                             .filter(mov -> {
-                                // Tenta data de vencimento primeiro, depois data de pagamento (para conta corrente)
+                                // Para filtros de data única (hoje), verifica múltiplos campos como o OMIE faz
+                                // OMIE usa data_previsao para "PAGAR HOJE" e "RECEBER HOJE", além de data_vencimento
+                                boolean isFiltroHoje = dataInicioFinal != null && dataFimFinal != null 
+                                    && dataInicioFinal.equals(dataFimFinal);
+                                
+                                // Verifica status "VENCE HOJE" quando filtrando por hoje
+                                if (isFiltroHoje) {
+                                    String status = getStringValue(mov, "status_titulo");
+                                    if (status != null && (status.contains("VENCE HOJE") || status.equals("VENCE HOJE"))) {
+                                        log.trace("Movimentação incluída por status 'VENCE HOJE': {}", status);
+                                        return true;
+                                    }
+                                }
+                                
+                                // OMIE usa data_previsao como critério principal para "PAGAR HOJE" e "RECEBER HOJE"
+                                // Verifica data_previsao primeiro (usado pelo OMIE para dashboard)
+                                String dataPrevisao = getStringValue(mov, "data_previsao");
+                                if (dataPrevisao != null && !dataPrevisao.isEmpty()) {
+                                    String dataPrevisaoNormalizada = normalizarData(dataPrevisao);
+                                    if (dataPrevisaoNormalizada != null) {
+                                        boolean previsaoDentroRange = true;
+                                        if (dataInicioFinal != null) {
+                                            previsaoDentroRange = dataPrevisaoNormalizada.compareTo(dataInicioFinal) >= 0;
+                                        }
+                                        if (previsaoDentroRange && dataFimFinal != null) {
+                                            previsaoDentroRange = dataPrevisaoNormalizada.compareTo(dataFimFinal) <= 0;
+                                        }
+                                        if (previsaoDentroRange) {
+                                            log.trace("Movimentação incluída por data_previsao: {}", dataPrevisaoNormalizada);
+                                            return true;
+                                        }
+                                    }
+                                }
+                                
+                                // Tenta data de vencimento
                                 String dataVenc = getStringValue(mov, "data_vencimento");
+                                
+                                // Se não tem data de vencimento, tenta data de pagamento (para conta corrente)
                                 if (dataVenc == null || dataVenc.isEmpty()) {
-                                    // Se não tem data de vencimento, tenta data de pagamento
                                     dataVenc = getStringValue(mov, "data_pagamento");
                                 }
                                 if (dataVenc == null || dataVenc.isEmpty()) {
@@ -1001,15 +1090,29 @@ public class OmieService {
                                     return true;
                                 }
                                 
-                                // Compara datas no formato DD/MM/YYYY
-                                boolean dentroRange = true;
-                                if (dataInicioFinal != null) {
-                                    dentroRange = dataVenc.compareTo(dataInicioFinal) >= 0;
+                                // Compara datas no formato DD/MM/YYYY usando parser adequado
+                                try {
+                                    String dataVencNormalizada = normalizarData(dataVenc);
+                                    if (dataVencNormalizada == null) {
+                                        return true; // Se não conseguiu normalizar, mantém
+                                    }
+                                    
+                                    boolean dentroRange = true;
+                                    if (dataInicioFinal != null) {
+                                        // Compara datas no formato DD/MM/YYYY (comparação lexicográfica funciona para este formato padronizado)
+                                        dentroRange = dataVencNormalizada.compareTo(dataInicioFinal) >= 0;
+                                        log.trace("Comparando data {} >= {}: {}", dataVencNormalizada, dataInicioFinal, dentroRange);
+                                    }
+                                    if (dentroRange && dataFimFinal != null) {
+                                        dentroRange = dataVencNormalizada.compareTo(dataFimFinal) <= 0;
+                                        log.trace("Comparando data {} <= {}: {}", dataVencNormalizada, dataFimFinal, dentroRange);
+                                    }
+                                    return dentroRange;
+                } catch (Exception e) {
+                                    // Se houver erro ao comparar, mantém a movimentação (não filtra)
+                                    log.debug("Erro ao comparar data {}: {}", dataVenc, e.getMessage());
+                                    return true;
                                 }
-                                if (dentroRange && dataFimFinal != null) {
-                                    dentroRange = dataVenc.compareTo(dataFimFinal) <= 0;
-                                }
-                                return dentroRange;
                             })
                             .collect(Collectors.toList());
                     
@@ -1155,6 +1258,166 @@ public class OmieService {
             log.error("Erro ao pesquisar movimentações do OMIE", e);
             throw new RuntimeException("Erro ao pesquisar movimentações: " + e.getMessage(), e);
         }
+    }
+
+    /**
+     * Retorna movimentações agrupadas por ano de emissão
+     * Similar ao relatório do OMIE que agrupa por ano
+     * 
+     * @param idEmpresa ID da empresa (opcional)
+     * @param tipo Filtro por tipo: 'receita' ou 'despesa' (opcional)
+     * @param categoria Filtro por categoria (opcional)
+     * @param textoPesquisa Filtro por texto (opcional)
+     */
+    @SuppressWarnings("unchecked")
+    public Map<String, Object> pesquisarMovimentacoesAgrupadasPorAno(
+            String idEmpresa,
+            String tipo,
+            String categoria,
+            String textoPesquisa) {
+        
+        if (mockEnabled) {
+            return criarMovimentacoesAgrupadasPorAnoMock();
+        }
+
+        try {
+            log.info("Pesquisando movimentações agrupadas por ano do OMIE: tipo={}, categoria={}, textoPesquisa={}",
+                    tipo, categoria, textoPesquisa);
+
+            // Busca todas as movimentações (sem filtro de data para pegar todos os anos)
+            // Busca todas as páginas para ter dados completos
+            List<Map<String, Object>> todasMovimentacoes = new ArrayList<>();
+            
+            // Busca todas as páginas
+            int pagina = 1;
+            int totalPaginas = 1;
+            int totalRegistros = 0;
+            Map<String, Object> resultadoPagina = null;
+            
+            do {
+                resultadoPagina = pesquisarMovimentacoes(
+                        idEmpresa, null, null, pagina, 500, tipo, categoria, textoPesquisa);
+                
+                List<Map<String, Object>> movimentacoesPagina = (List<Map<String, Object>>) resultadoPagina.get("movimentacoes");
+                if (movimentacoesPagina != null) {
+                    todasMovimentacoes.addAll(movimentacoesPagina);
+                }
+                
+                if (pagina == 1) {
+                    totalPaginas = resultadoPagina.get("totalPaginas") != null ? 
+                            ((Number) resultadoPagina.get("totalPaginas")).intValue() : 1;
+                    totalRegistros = resultadoPagina.get("total") != null ? 
+                            ((Number) resultadoPagina.get("total")).intValue() : todasMovimentacoes.size();
+                }
+                
+                pagina++;
+            } while (pagina <= totalPaginas && todasMovimentacoes.size() < totalRegistros);
+
+            // Agrupa por ano de emissão
+            Map<String, Map<String, Object>> agrupamentoPorAno = new HashMap<>();
+            double totalGeral = 0.0;
+
+            for (Map<String, Object> mov : todasMovimentacoes) {
+                String dataEmissao = getStringValue(mov, "data_emissao");
+                String ano = null;
+                
+                // Extrai o ano da data de emissão
+                if (dataEmissao != null && !dataEmissao.isEmpty()) {
+                    // Tenta formato DD/MM/YYYY
+                    if (dataEmissao.matches("\\d{2}/\\d{2}/\\d{4}")) {
+                        String[] partes = dataEmissao.split("/");
+                        if (partes.length == 3) {
+                            ano = partes[2];
+                        }
+                    } else if (dataEmissao.matches("\\d{4}-\\d{2}-\\d{2}")) {
+                        // Formato YYYY-MM-DD
+                        String[] partes = dataEmissao.split("-");
+                        if (partes.length == 3) {
+                            ano = partes[0];
+                        }
+                    }
+                }
+                
+                // Se não conseguiu extrair o ano, usa ano atual como fallback
+                if (ano == null || ano.isEmpty()) {
+                    ano = String.valueOf(java.time.Year.now().getValue());
+                }
+
+                // Obtém ou cria o grupo do ano
+                Map<String, Object> grupoAno = agrupamentoPorAno.get(ano);
+                if (grupoAno == null) {
+                    grupoAno = new HashMap<>();
+                    grupoAno.put("ano", ano);
+                    grupoAno.put("valor", 0.0);
+                    grupoAno.put("quantidade", 0);
+                    agrupamentoPorAno.put(ano, grupoAno);
+                }
+
+                // Acumula valores
+                Object valorObj = mov.get("valor_documento");
+                if (valorObj != null) {
+                    double valor = valorObj instanceof Number ? 
+                            ((Number) valorObj).doubleValue() : 
+                            Double.parseDouble(valorObj.toString());
+                    
+                    double valorAtual = ((Number) grupoAno.get("valor")).doubleValue();
+                    grupoAno.put("valor", valorAtual + valor);
+                    totalGeral += valor;
+                }
+
+                // Incrementa quantidade
+                int quantidadeAtual = ((Number) grupoAno.get("quantidade")).intValue();
+                grupoAno.put("quantidade", quantidadeAtual + 1);
+            }
+
+            // Converte o mapa para lista ordenada por ano (decrescente)
+            List<Map<String, Object>> agrupamentos = new ArrayList<>(agrupamentoPorAno.values());
+            agrupamentos.sort((a, b) -> {
+                String anoA = (String) a.get("ano");
+                String anoB = (String) b.get("ano");
+                return anoB.compareTo(anoA); // Ordem decrescente (ano mais recente primeiro)
+            });
+
+            // Constrói resultado
+            Map<String, Object> resultado = new HashMap<>();
+            resultado.put("agrupamentos", agrupamentos);
+            resultado.put("totalGeral", totalGeral);
+            resultado.put("totalAnos", agrupamentos.size());
+
+            log.info("Movimentações agrupadas por ano: {} anos encontrados, total geral: {}", 
+                    agrupamentos.size(), totalGeral);
+
+            return resultado;
+        } catch (Exception e) {
+            log.error("Erro ao pesquisar movimentações agrupadas por ano do OMIE", e);
+            throw new RuntimeException("Erro ao pesquisar movimentações agrupadas por ano: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Cria dados mock para movimentações agrupadas por ano
+     */
+    private Map<String, Object> criarMovimentacoesAgrupadasPorAnoMock() {
+        List<Map<String, Object>> agrupamentos = new ArrayList<>();
+        
+        Map<String, Object> ano2026 = new HashMap<>();
+        ano2026.put("ano", "2026");
+        ano2026.put("valor", 212450.54);
+        ano2026.put("quantidade", 50);
+        agrupamentos.add(ano2026);
+        
+        Map<String, Object> ano2025 = new HashMap<>();
+        ano2025.put("ano", "2025");
+        ano2025.put("valor", 160494.28);
+        ano2025.put("quantidade", 43);
+        agrupamentos.add(ano2025);
+        
+        Map<String, Object> resultado = new HashMap<>();
+        resultado.put("agrupamentos", agrupamentos);
+        resultado.put("totalGeral", 372944.82);
+        resultado.put("totalAnos", 2);
+        
+        return resultado;
     }
 
     /**
@@ -1582,6 +1845,50 @@ public class OmieService {
             }
         }
         return null;
+    }
+
+    /**
+     * Normaliza uma data para o formato DD/MM/YYYY
+     * Aceita formatos: DD/MM/YYYY, YYYY-MM-DD, ou outros formatos comuns
+     */
+    private String normalizarData(String data) {
+        if (data == null || data.isEmpty()) {
+            return null;
+        }
+        
+        try {
+            String dataNormalizada = data.trim();
+            
+            // Se a data não está no formato DD/MM/YYYY, tenta converter
+            if (!dataNormalizada.matches("\\d{2}/\\d{2}/\\d{4}")) {
+                // Tenta outros formatos comuns
+                if (dataNormalizada.matches("\\d{4}-\\d{2}-\\d{2}")) {
+                    // Formato YYYY-MM-DD -> converte para DD/MM/YYYY
+                    String[] partes = dataNormalizada.split("-");
+                    if (partes.length == 3) {
+                        dataNormalizada = partes[2] + "/" + partes[1] + "/" + partes[0];
+                    }
+                } else {
+                    // Se não conseguir converter, retorna null
+                    log.debug("Data em formato desconhecido: {}", data);
+                    return null;
+                }
+            }
+            
+            // Garante que a data está no formato DD/MM/YYYY padronizado
+            // Normaliza removendo zeros à esquerda desnecessários (mas mantém formato DD/MM/YYYY)
+            String[] partes = dataNormalizada.split("/");
+            if (partes.length == 3) {
+                String dia = partes[0].length() == 1 ? "0" + partes[0] : partes[0];
+                String mes = partes[1].length() == 1 ? "0" + partes[1] : partes[1];
+                dataNormalizada = dia + "/" + mes + "/" + partes[2];
+            }
+            
+            return dataNormalizada;
+        } catch (Exception e) {
+            log.debug("Erro ao normalizar data {}: {}", data, e.getMessage());
+            return null;
+        }
     }
 
     /**

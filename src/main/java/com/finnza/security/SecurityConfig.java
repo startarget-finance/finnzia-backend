@@ -70,6 +70,7 @@ public class SecurityConfig {
                 .requestMatchers("/api/public/**").permitAll()
                 .requestMatchers("/api/usuarios/primeiro-admin").permitAll()
                 .requestMatchers("/api/webhooks/asaas").permitAll() // Webhook do Asaas (sem autenticação)
+                .requestMatchers("/api/clint/**").permitAll() // Endpoint da Clint (sem autenticação)
                 .requestMatchers("/api/test/**").authenticated() // Endpoint de teste (requer autenticação)
                 .requestMatchers("/actuator/health").permitAll()
                 .anyRequest().authenticated()
@@ -97,7 +98,9 @@ public class SecurityConfig {
         configuration.setAllowedOrigins(List.of(
             "http://localhost:4200", 
             "http://localhost:3000",
-            "https://ia-financeira-erp.vercel.app"
+            "https://ia-financeira-erp.vercel.app",
+            "https://www.finzzia.com.br",
+            "https://finzzia.com.br"
         ));
         configuration.setAllowedMethods(Arrays.asList("GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"));
         configuration.setAllowedHeaders(Arrays.asList("*"));

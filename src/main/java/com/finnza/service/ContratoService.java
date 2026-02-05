@@ -11,6 +11,7 @@ import com.finnza.repository.CobrancaRepository;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -98,6 +99,7 @@ public class ContratoService {
 
     /**
      * Busca contrato por ID
+     * Sincroniza com Asaas para garantir dados atualizados ao visualizar um contrato específico
      */
     @Transactional
     public ContratoDTO buscarPorId(Long id) {
@@ -108,8 +110,8 @@ public class ContratoService {
             throw new RuntimeException("Contrato não encontrado");
         }
 
-        // Recalcular status automaticamente antes de retornar
-        recalcularEAtualizarStatus(contrato);
+        // Sincronizar com Asaas ao buscar um contrato específico (apenas um contrato, não causa rate limit)
+        recalcularEAtualizarStatus(contrato, true);
         
         return toDTO(contrato);
     }
@@ -139,19 +141,196 @@ public class ContratoService {
     }
 
     /**
-     * Busca contratos com filtros
+     * Busca contratos com filtros (igual ao Asaas)
      */
     @Transactional
-    public Page<ContratoDTO> buscarComFiltros(Long clienteId, Contrato.StatusContrato status, String termo, Pageable pageable) {
-        // Normalizar termo para evitar problemas com null
+    public Page<ContratoDTO> buscarComFiltros(
+            Long clienteId, 
+            String status, 
+            String termo, 
+            String billingType,
+            String dueDateGe,
+            String dueDateLe,
+            String paymentDateGe,
+            String paymentDateLe,
+            Pageable pageable) {
+        
+        // Normalizar termo
         String termoNormalizado = (termo != null && !termo.trim().isEmpty()) ? termo.trim() : null;
-        // Converter status enum para String para a query nativa
-        String statusStr = status != null ? status.name() : null;
-        return contratoRepository.buscarComFiltros(clienteId, statusStr, termoNormalizado, pageable)
+        
+        // Verificar se há filtros complexos que requerem busca completa
+        boolean temFiltrosComplexos = (status != null && !status.trim().isEmpty() && !status.equals("todos")) ||
+                                      (billingType != null && !billingType.trim().isEmpty() && !billingType.equals("todos")) ||
+                                      (dueDateGe != null && !dueDateGe.trim().isEmpty()) ||
+                                      (dueDateLe != null && !dueDateLe.trim().isEmpty()) ||
+                                      (paymentDateGe != null && !paymentDateGe.trim().isEmpty()) ||
+                                      (paymentDateLe != null && !paymentDateLe.trim().isEmpty());
+        
+        // Se não há filtros complexos, retornar diretamente a página do banco
+        if (!temFiltrosComplexos) {
+            Page<Contrato> contratosPage = contratoRepository.buscarComFiltros(clienteId, termoNormalizado, pageable);
+            return contratosPage.map(contrato -> {
+                recalcularEAtualizarStatus(contrato, false);
+                return toDTO(contrato);
+            });
+        }
+        
+        // Se há filtros complexos, buscar TODOS os contratos (sem paginação) para filtrar corretamente
+        Page<Contrato> todasPaginas = contratoRepository.buscarComFiltros(
+            clienteId, 
+            termoNormalizado, 
+            org.springframework.data.domain.PageRequest.of(0, Integer.MAX_VALUE)
+        );
+        List<Contrato> todosContratos = todasPaginas.getContent();
+        
+        // Filtrar por status de cobrança (status do Asaas) e datas
+        List<Contrato> contratosFiltrados = todosContratos.stream()
+                .filter(contrato -> {
+                    // Forçar carregamento das cobranças
+                    if (contrato.getCobrancas() != null) {
+                        contrato.getCobrancas().size();
+                    }
+                    
+                    // Filtrar por status (status do Asaas nas cobranças)
+                    if (status != null && !status.trim().isEmpty() && !status.equals("todos")) {
+                        boolean statusMatch = false;
+                        String statusUpper = status.toUpperCase();
+                        
+                        // Mapear status do Asaas para status de cobrança
+                        if (contrato.getCobrancas() != null && !contrato.getCobrancas().isEmpty()) {
+                            for (Cobranca cobranca : contrato.getCobrancas()) {
+                                switch (statusUpper) {
+                                    case "PENDING":
+                                        statusMatch = cobranca.getStatus() == Cobranca.StatusCobranca.PENDING;
+                                        break;
+                                    case "OVERDUE":
+                                        statusMatch = cobranca.getStatus() == Cobranca.StatusCobranca.OVERDUE;
+                                        break;
+                                    case "RECEIVED":
+                                    case "CONFIRMED":
+                                        statusMatch = cobranca.getStatus() == Cobranca.StatusCobranca.RECEIVED;
+                                        break;
+                                    case "REFUNDED":
+                                    case "REFUNDING":
+                                        statusMatch = cobranca.getStatus() == Cobranca.StatusCobranca.REFUNDED;
+                                        break;
+                                    case "RECEIVED_IN_CASH_UNDONE":
+                                        statusMatch = cobranca.getStatus() == Cobranca.StatusCobranca.RECEIVED_IN_CASH_UNDONE;
+                                        break;
+                                    case "CHARGEBACK_REQUESTED":
+                                        statusMatch = cobranca.getStatus() == Cobranca.StatusCobranca.CHARGEBACK_REQUESTED;
+                                        break;
+                                    default:
+                                        // Tentar mapear para status de contrato
+                                        try {
+                                            Contrato.StatusContrato statusContrato = Contrato.StatusContrato.valueOf(statusUpper);
+                                            statusMatch = contrato.getStatus() == statusContrato;
+                                        } catch (IllegalArgumentException e) {
+                                            statusMatch = true; // Se não reconhecer, não filtra
+                                        }
+                                        break;
+                                }
+                                if (statusMatch) break;
+                            }
+                        } else {
+                            // Se não tem cobranças, tentar mapear para status de contrato
+                            try {
+                                Contrato.StatusContrato statusContrato = Contrato.StatusContrato.valueOf(statusUpper);
+                                statusMatch = contrato.getStatus() == statusContrato;
+                            } catch (IllegalArgumentException e) {
+                                statusMatch = false;
+                            }
+                        }
+                        
+                        if (!statusMatch) return false;
+                    }
+                    
+                    // Filtrar por data de vencimento
+                    if (dueDateGe != null && !dueDateGe.trim().isEmpty()) {
+                        LocalDate dataInicio = LocalDate.parse(dueDateGe);
+                        if (contrato.getCobrancas() != null && !contrato.getCobrancas().isEmpty()) {
+                            boolean temCobrancaValida = contrato.getCobrancas().stream()
+                                    .anyMatch(c -> c.getDataVencimento() != null && 
+                                                  !c.getDataVencimento().isBefore(dataInicio));
+                            if (!temCobrancaValida && contrato.getDataVencimento() != null && 
+                                contrato.getDataVencimento().isBefore(dataInicio)) {
+                                return false;
+                            }
+                        } else if (contrato.getDataVencimento() != null && 
+                                  contrato.getDataVencimento().isBefore(dataInicio)) {
+                            return false;
+                        }
+                    }
+                    
+                    if (dueDateLe != null && !dueDateLe.trim().isEmpty()) {
+                        LocalDate dataFim = LocalDate.parse(dueDateLe);
+                        if (contrato.getCobrancas() != null && !contrato.getCobrancas().isEmpty()) {
+                            boolean temCobrancaValida = contrato.getCobrancas().stream()
+                                    .anyMatch(c -> c.getDataVencimento() != null && 
+                                                  !c.getDataVencimento().isAfter(dataFim));
+                            if (!temCobrancaValida && contrato.getDataVencimento() != null && 
+                                contrato.getDataVencimento().isAfter(dataFim)) {
+                                return false;
+                            }
+                        } else if (contrato.getDataVencimento() != null && 
+                                  contrato.getDataVencimento().isAfter(dataFim)) {
+                            return false;
+                        }
+                    }
+                    
+                    // Filtrar por data de pagamento
+                    if (paymentDateGe != null && !paymentDateGe.trim().isEmpty()) {
+                        LocalDate dataInicio = LocalDate.parse(paymentDateGe);
+                        if (contrato.getCobrancas() == null || contrato.getCobrancas().isEmpty() ||
+                            contrato.getCobrancas().stream().noneMatch(c -> 
+                                c.getDataPagamento() != null && !c.getDataPagamento().isBefore(dataInicio))) {
+                            return false;
+                        }
+                    }
+                    
+                    if (paymentDateLe != null && !paymentDateLe.trim().isEmpty()) {
+                        LocalDate dataFim = LocalDate.parse(paymentDateLe);
+                        if (contrato.getCobrancas() == null || contrato.getCobrancas().isEmpty() ||
+                            contrato.getCobrancas().stream().noneMatch(c -> 
+                                c.getDataPagamento() != null && !c.getDataPagamento().isAfter(dataFim))) {
+                            return false;
+                        }
+                    }
+                    
+                    // Filtrar por tipo de pagamento (billingType)
+                    // Nota: billingType não está armazenado na entidade Cobranca
+                    // Por enquanto, este filtro não está totalmente funcional pois não temos essa informação persistida
+                    // TODO: Adicionar campo billingType à entidade Cobranca para suportar este filtro corretamente
+                    if (billingType != null && !billingType.trim().isEmpty() && !billingType.equals("todos")) {
+                        // Por enquanto, não filtramos por billingType pois essa informação não está disponível
+                        // Isso pode ser implementado no futuro adicionando o campo à entidade Cobranca
+                        // Por enquanto, aceita todos os contratos (filtro não aplicado)
+                    }
+                    
+                    return true;
+                })
+                .collect(java.util.stream.Collectors.toList());
+        
+        // Aplicar paginação manualmente
+        int start = (int) pageable.getOffset();
+        int end = Math.min(start + pageable.getPageSize(), contratosFiltrados.size());
+        List<Contrato> contratosPaginados = start < contratosFiltrados.size() 
+                ? contratosFiltrados.subList(start, end) 
+                : java.util.Collections.emptyList();
+        
+        // Recalcular status e converter para DTO
+        List<ContratoDTO> contratosDTO = contratosPaginados.stream()
                 .map(contrato -> {
-                    recalcularEAtualizarStatus(contrato);
+                    recalcularEAtualizarStatus(contrato, false);
                     return toDTO(contrato);
-                });
+                })
+                .collect(java.util.stream.Collectors.toList());
+        
+        return new org.springframework.data.domain.PageImpl<>(
+                contratosDTO, 
+                pageable, 
+                contratosFiltrados.size()
+        );
     }
 
     /**
@@ -241,17 +420,20 @@ public class ContratoService {
 
     /**
      * Recalcula e atualiza o status do contrato se necessário
-     * Sincroniza com Asaas antes de recalcular para garantir dados atualizados
+     * Sincroniza com Asaas antes de recalcular para garantir dados atualizados (apenas se sincronizar = true)
      * Salva apenas se o status mudou para evitar writes desnecessários
+     * 
+     * @param contrato Contrato a ser recalculado
+     * @param sincronizarComAsaas Se true, sincroniza com Asaas antes de recalcular. Se false, apenas recalcula baseado nos dados já salvos.
      */
-    private void recalcularEAtualizarStatus(Contrato contrato) {
+    private void recalcularEAtualizarStatus(Contrato contrato, boolean sincronizarComAsaas) {
         // Garantir que as cobranças sejam carregadas (forçar inicialização do lazy)
         if (contrato.getCobrancas() != null) {
             contrato.getCobrancas().size(); // Força o carregamento do lazy collection
         }
         
-        // Sincronizar cobranças com Asaas (apenas se não estiver em modo mock)
-        if (!asaasService.isMockEnabled() && contrato.getCobrancas() != null && !contrato.getCobrancas().isEmpty()) {
+        // Sincronizar cobranças com Asaas apenas se solicitado e não estiver em modo mock
+        if (sincronizarComAsaas && !asaasService.isMockEnabled() && contrato.getCobrancas() != null && !contrato.getCobrancas().isEmpty()) {
             log.debug("Sincronizando cobranças do contrato {} com Asaas", contrato.getId());
             sincronizarCobrancasComAsaas(contrato);
         }
@@ -266,6 +448,14 @@ public class ContratoService {
             log.info("Status do contrato {} atualizado automaticamente de {} para {}", 
                     contrato.getId(), statusAnterior, contrato.getStatus());
         }
+    }
+    
+    /**
+     * Recalcula e atualiza o status do contrato sem sincronizar com Asaas
+     * Usado em buscas/listagens para evitar muitas requisições à API do Asaas
+     */
+    private void recalcularEAtualizarStatus(Contrato contrato) {
+        recalcularEAtualizarStatus(contrato, false);
     }
 
     /**
@@ -501,9 +691,154 @@ public class ContratoService {
                 .whatsapp(contrato.getWhatsapp())
                 .asaasSubscriptionId(contrato.getAsaasSubscriptionId())
                 .cobrancas(cobrancasDTO)
+                .categoria(calcularCategoria(contrato))
                 .dataCriacao(contrato.getDataCriacao())
                 .dataAtualizacao(contrato.getDataAtualizacao())
                 .build();
+    }
+    
+    /**
+     * Calcula a categoria do contrato (mutuamente exclusivo)
+     * Prioridade: INADIMPLENTE > EM_DIA > PENDENTE
+     */
+    private ContratoDTO.CategoriaContrato calcularCategoria(Contrato contrato) {
+        LocalDate hoje = LocalDate.now();
+        
+        // PRIORIDADE 1: Inadimplentes (qualquer coisa vencida)
+        if (contrato.getStatus() == Contrato.StatusContrato.VENCIDO) {
+            return ContratoDTO.CategoriaContrato.INADIMPLENTE;
+        }
+        
+        if (contrato.getCobrancas() != null && !contrato.getCobrancas().isEmpty()) {
+            // Cobranças OVERDUE ou com problemas graves
+            boolean temVencida = contrato.getCobrancas().stream().anyMatch(cob -> 
+                cob.getStatus() == Cobranca.StatusCobranca.OVERDUE || 
+                cob.getStatus() == Cobranca.StatusCobranca.DUNNING_REQUESTED ||
+                cob.getStatus() == Cobranca.StatusCobranca.CHARGEBACK_REQUESTED
+            );
+            if (temVencida) {
+                return ContratoDTO.CategoriaContrato.INADIMPLENTE;
+            }
+            
+            // Cobranças PENDING vencidas (qualquer tempo)
+            boolean temPendenteVencida = contrato.getCobrancas().stream().anyMatch(cob -> {
+                if (cob.getStatus() == Cobranca.StatusCobranca.PENDING && cob.getDataVencimento() != null) {
+                    return cob.getDataVencimento().isBefore(hoje);
+                }
+                return false;
+            });
+            if (temPendenteVencida) {
+                return ContratoDTO.CategoriaContrato.INADIMPLENTE;
+            }
+        }
+        
+        // Contrato assinado vencido (qualquer tempo)
+        if (contrato.getStatus() == Contrato.StatusContrato.ASSINADO) {
+            if (contrato.getDataVencimento() != null && contrato.getDataVencimento().isBefore(hoje)) {
+                return ContratoDTO.CategoriaContrato.INADIMPLENTE;
+            }
+        }
+        
+        // PRIORIDADE 2: Em Dia
+        if (contrato.getStatus() == Contrato.StatusContrato.PAGO) {
+            return ContratoDTO.CategoriaContrato.EM_DIA;
+        }
+        
+        if (contrato.getCobrancas() != null && !contrato.getCobrancas().isEmpty()) {
+            // Todas pagas
+            boolean todasPagas = contrato.getCobrancas().stream().allMatch(cob -> 
+                cob.getStatus() == Cobranca.StatusCobranca.RECEIVED || 
+                cob.getStatus() == Cobranca.StatusCobranca.RECEIVED_IN_CASH_UNDONE || 
+                cob.getStatus() == Cobranca.StatusCobranca.DUNNING_RECEIVED
+            );
+            if (todasPagas) {
+                return ContratoDTO.CategoriaContrato.EM_DIA;
+            }
+            
+            // Pelo menos uma paga
+            boolean temPaga = contrato.getCobrancas().stream().anyMatch(cob -> 
+                cob.getStatus() == Cobranca.StatusCobranca.RECEIVED || 
+                cob.getStatus() == Cobranca.StatusCobranca.RECEIVED_IN_CASH_UNDONE || 
+                cob.getStatus() == Cobranca.StatusCobranca.DUNNING_RECEIVED
+            );
+            if (temPaga) {
+                return ContratoDTO.CategoriaContrato.EM_DIA;
+            }
+            
+            // Todas PENDING e data futura
+            boolean todasPendentes = contrato.getCobrancas().stream()
+                .allMatch(cob -> cob.getStatus() == Cobranca.StatusCobranca.PENDING);
+            if (todasPendentes && contrato.getDataVencimento() != null && 
+                !contrato.getDataVencimento().isBefore(hoje)) {
+                return ContratoDTO.CategoriaContrato.EM_DIA;
+            }
+        }
+        
+        if (contrato.getStatus() == Contrato.StatusContrato.ASSINADO) {
+            if (contrato.getDataVencimento() != null && !contrato.getDataVencimento().isBefore(hoje)) {
+                return ContratoDTO.CategoriaContrato.EM_DIA;
+            }
+        }
+        
+        // PRIORIDADE 4: Pendentes (padrão)
+        return ContratoDTO.CategoriaContrato.PENDENTE;
+    }
+    
+    /**
+     * Retorna totais por categoria de contratos
+     */
+    @Transactional(readOnly = true)
+    public Map<String, Object> getTotaisPorCategoria() {
+        // Buscar todos os contratos não deletados (sem paginação)
+        List<Contrato> todosContratos = contratoRepository.findAllNaoDeletados();
+        
+        long totalContratos = todosContratos.size();
+        BigDecimal totalValor = todosContratos.stream()
+            .map(Contrato::getValorContrato)
+            .reduce(BigDecimal.ZERO, BigDecimal::add);
+        
+        long emDia = 0;
+        long pendente = 0;
+        long inadimplente = 0;
+        
+        BigDecimal valorEmDia = BigDecimal.ZERO;
+        BigDecimal valorPendente = BigDecimal.ZERO;
+        BigDecimal valorInadimplente = BigDecimal.ZERO;
+        
+        for (Contrato contrato : todosContratos) {
+            // Recalcular status antes de calcular categoria
+            recalcularEAtualizarStatus(contrato, false);
+            ContratoDTO.CategoriaContrato categoria = calcularCategoria(contrato);
+            
+            BigDecimal valorContrato = contrato.getValorContrato() != null ? contrato.getValorContrato() : BigDecimal.ZERO;
+            
+            switch (categoria) {
+                case EM_DIA:
+                    emDia++;
+                    valorEmDia = valorEmDia.add(valorContrato);
+                    break;
+                case PENDENTE:
+                    pendente++;
+                    valorPendente = valorPendente.add(valorContrato);
+                    break;
+                case INADIMPLENTE:
+                    inadimplente++;
+                    valorInadimplente = valorInadimplente.add(valorContrato);
+                    break;
+            }
+        }
+        
+        Map<String, Object> totais = new java.util.HashMap<>();
+        totais.put("totalContratos", totalContratos);
+        totais.put("totalValor", totalValor);
+        totais.put("emDia", emDia);
+        totais.put("pendente", pendente);
+        totais.put("inadimplente", inadimplente);
+        totais.put("valorEmDia", valorEmDia);
+        totais.put("valorPendente", valorPendente);
+        totais.put("valorInadimplente", valorInadimplente);
+        
+        return totais;
     }
 
     /**
@@ -702,6 +1037,11 @@ public class ContratoService {
             Object valorObj = assinatura.get("value");
             BigDecimal valor = valorObj != null ? new BigDecimal(valorObj.toString()) : BigDecimal.ZERO;
             
+            // Garantir que valor seja pelo menos 0.01 para evitar problemas com valores zero
+            if (valor.compareTo(BigDecimal.ZERO) <= 0) {
+                valor = BigDecimal.valueOf(0.01);
+            }
+            
             Object nextDueDateObj = assinatura.get("nextDueDate");
             LocalDate dataVencimento = null;
             if (nextDueDateObj != null) {
@@ -711,10 +1051,17 @@ public class ContratoService {
                 }
             }
 
+            // Obter título da assinatura ou usar um padrão
+            String titulo = (String) assinatura.get("description");
+            if (titulo == null || titulo.trim().isEmpty()) {
+                titulo = "Contrato Recorrente - " + cliente.getRazaoSocial();
+            }
+
             Contrato contrato = Contrato.builder()
-                    .titulo((String) assinatura.get("description"))
+                    .titulo(titulo)
                     .descricao("Contrato importado do Asaas")
                     .cliente(cliente)
+                    .valorContrato(valor) // Obrigatório: usar o valor da recorrência como valor do contrato
                     .valorRecorrencia(valor)
                     .dataVencimento(dataVencimento != null ? dataVencimento : LocalDate.now().plusMonths(1))
                     .status(Contrato.StatusContrato.PENDENTE)

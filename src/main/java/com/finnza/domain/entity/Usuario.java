@@ -86,6 +86,12 @@ public class Usuario {
     @Column(name = "token_reset_senha_expiracao")
     private LocalDateTime tokenResetSenhaExpiracao;
 
+    @Column(name = "omie_app_key", length = 100)
+    private String omieAppKey;
+
+    @Column(name = "omie_app_secret", length = 200)
+    private String omieAppSecret;
+
     @OneToMany(mappedBy = "usuario", cascade = CascadeType.ALL, orphanRemoval = true, fetch = FetchType.LAZY)
     @Builder.Default
     @org.hibernate.annotations.BatchSize(size = 20)

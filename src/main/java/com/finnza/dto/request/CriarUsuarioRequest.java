@@ -33,5 +33,11 @@ public class CriarUsuarioRequest {
 
     @NotNull(message = "Role é obrigatória")
     private Usuario.Role role;
+
+    @Size(max = 100, message = "OMIE App Key deve ter no máximo 100 caracteres")
+    private String omieAppKey;
+
+    @Size(max = 200, message = "OMIE App Secret deve ter no máximo 200 caracteres")
+    private String omieAppSecret;
 }
 

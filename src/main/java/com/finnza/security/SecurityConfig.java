@@ -96,9 +96,10 @@ public class SecurityConfig {
         CorsConfiguration configuration = new CorsConfiguration();
         
         // Permitir origens específicas (desenvolvimento e produção)
-        // Usando allowedOriginPatterns para maior flexibilidade e segurança
-        configuration.setAllowedOriginPatterns(List.of(
-            "http://localhost:*",  // Permite qualquer porta localhost (desenvolvimento)
+        // IMPORTANTE: Quando allowCredentials=true, deve usar setAllowedOrigins (não patterns)
+        configuration.setAllowedOrigins(List.of(
+            "http://localhost:4200",  // Angular dev server
+            "http://localhost:3000",  // Outros dev servers
             "https://ia-financeira-erp.vercel.app",
             "https://www.finzzia.com.br",
             "https://finzzia.com.br"

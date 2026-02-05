@@ -94,18 +94,42 @@ public class SecurityConfig {
     @Bean
     public CorsConfigurationSource corsConfigurationSource() {
         CorsConfiguration configuration = new CorsConfiguration();
-        // Permitir localhost (desenvolvimento) e Vercel (produção)
-        configuration.setAllowedOrigins(List.of(
-            "http://localhost:4200", 
-            "http://localhost:3000",
+        
+        // Permitir origens específicas (desenvolvimento e produção)
+        // Usando allowedOriginPatterns para maior flexibilidade e segurança
+        configuration.setAllowedOriginPatterns(List.of(
+            "http://localhost:*",  // Permite qualquer porta localhost (desenvolvimento)
             "https://ia-financeira-erp.vercel.app",
             "https://www.finzzia.com.br",
             "https://finzzia.com.br"
         ));
+        
+        // Métodos HTTP permitidos
         configuration.setAllowedMethods(Arrays.asList("GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"));
-        configuration.setAllowedHeaders(Arrays.asList("*"));
-        configuration.setExposedHeaders(Arrays.asList("*")); // Expor todos os headers na resposta
+        
+        // Headers permitidos na requisição
+        configuration.setAllowedHeaders(Arrays.asList(
+            "Authorization",
+            "Content-Type",
+            "X-Requested-With",
+            "Accept",
+            "Origin",
+            "Access-Control-Request-Method",
+            "Access-Control-Request-Headers"
+        ));
+        
+        // Headers expostos na resposta (importante para o frontend acessar)
+        configuration.setExposedHeaders(Arrays.asList(
+            "Authorization",
+            "Content-Type",
+            "Access-Control-Allow-Origin",
+            "Access-Control-Allow-Credentials"
+        ));
+        
+        // Permitir credenciais (cookies, auth headers) - necessário para JWT
         configuration.setAllowCredentials(true);
+        
+        // Cache do preflight (OPTIONS) por 1 hora
         configuration.setMaxAge(3600L);
 
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();

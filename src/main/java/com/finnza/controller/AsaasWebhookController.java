@@ -114,11 +114,11 @@ public class AsaasWebhookController {
                 contratoRepository.save(contrato);
                 log.info("Contrato {} cancelado devido ao cancelamento da assinatura", contrato.getId());
             } 
-            // Se a assinatura está ativa e o contrato está pendente, atualizar para ASSINADO
+            // Se a assinatura está ativa e o contrato está pendente, atualizar para EM_DIA
             else if ("ACTIVE".equals(statusAsaas) && contrato.getStatus() == Contrato.StatusContrato.PENDENTE) {
-                contrato.setStatus(Contrato.StatusContrato.ASSINADO);
+                contrato.setStatus(Contrato.StatusContrato.EM_DIA);
                 contratoRepository.save(contrato);
-                log.info("Contrato {} atualizado para ASSINADO devido à ativação da assinatura", contrato.getId());
+                log.info("Contrato {} atualizado para EM_DIA devido à ativação da assinatura", contrato.getId());
             }
             // Se a assinatura está com pagamento em atraso, atualizar para VENCIDO
             else if ("OVERDUE".equals(statusAsaas)) {

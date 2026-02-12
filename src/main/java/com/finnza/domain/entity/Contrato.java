@@ -110,7 +110,7 @@ public class Contrato {
      */
     public enum StatusContrato {
         PENDENTE,
-        ASSINADO,
+        EM_DIA,
         VENCIDO,
         PAGO,
         CANCELADO
@@ -184,14 +184,25 @@ public class Contrato {
             return;
         }
         
-        // Se tem cobranças pendentes e data de vencimento é futura, está ASSINADO
+        // Se tem cobranças pendentes com data futura (e nenhuma vencida), está EM_DIA
+        boolean temPendentesFuturas = this.cobrancas.stream().anyMatch(c -> 
+            c.getStatus() == Cobranca.StatusCobranca.PENDING && 
+            c.getDataVencimento() != null && 
+            !c.getDataVencimento().isBefore(hoje)
+        );
+        
+        if (temPendentesFuturas) {
+            this.status = StatusContrato.EM_DIA;
+            return;
+        }
+        
+        // Se tem cobranças pendentes (sem data ou data passada já tratada acima como vencida)
         boolean temPendentes = this.cobrancas.stream().anyMatch(c -> 
             c.getStatus() == Cobranca.StatusCobranca.PENDING
         );
         
-        if (temPendentes && this.dataVencimento != null && 
-            (this.dataVencimento.isAfter(hoje) || this.dataVencimento.isEqual(hoje))) {
-            this.status = StatusContrato.ASSINADO;
+        if (temPendentes) {
+            this.status = StatusContrato.EM_DIA;
             return;
         }
         

@@ -285,6 +285,7 @@ public class AsaasService {
 
     /**
      * Consulta status de uma cobrança no Asaas
+     * Retorna null se a cobrança não existir mais no Asaas (404)
      */
     public Map<String, Object> consultarCobranca(String paymentId) {
         if (mockEnabled) {
@@ -301,8 +302,12 @@ public class AsaasService {
                     .block();
 
             return response;
+        } catch (org.springframework.web.reactive.function.client.WebClientResponseException.NotFound e) {
+            // Cobrança não existe mais no Asaas (foi deletada ou removida)
+            log.warn("Cobrança {} não encontrada no Asaas (404). Pode ter sido removida.", paymentId);
+            return null;
         } catch (Exception e) {
-            log.error("Erro ao consultar cobrança no Asaas", e);
+            log.error("Erro ao consultar cobrança {} no Asaas: {}", paymentId, e.getMessage());
             throw new RuntimeException("Erro ao consultar cobrança no Asaas: " + e.getMessage(), e);
         }
     }
@@ -481,6 +486,67 @@ public class AsaasService {
         } catch (Exception e) {
             log.error("Erro ao listar cobranças do Asaas", e);
             return todasCobrancas; // Retorna o que conseguiu buscar até o erro
+        }
+    }
+
+    /**
+     * Lista cobranças (payments) de uma assinatura específica no Asaas
+     * Endpoint: GET /v3/subscriptions/{id}/payments
+     */
+    @SuppressWarnings("unchecked")
+    public java.util.List<Map<String, Object>> listarCobrancasPorAssinatura(String subscriptionId) {
+        if (mockEnabled) {
+            return new java.util.ArrayList<>();
+        }
+
+        java.util.List<Map<String, Object>> todasCobrancas = new java.util.ArrayList<>();
+        final int limit = 100;
+        int currentOffset = 0;
+        boolean temMais = true;
+
+        try {
+            while (temMais) {
+                final int offset = currentOffset;
+                Map<String, Object> response = webClient.get()
+                        .uri(uriBuilder -> uriBuilder
+                                .path("/subscriptions/{id}/payments")
+                                .queryParam("offset", offset)
+                                .queryParam("limit", limit)
+                                .build(subscriptionId))
+                        .header("access_token", apiKey)
+                        .retrieve()
+                        .bodyToMono(Map.class)
+                        .block();
+
+                if (response == null) {
+                    break;
+                }
+
+                java.util.List<Map<String, Object>> data = (java.util.List<Map<String, Object>>) response.get("data");
+                if (data == null || data.isEmpty()) {
+                    temMais = false;
+                } else {
+                    todasCobrancas.addAll(data);
+                    log.info("Buscando cobranças da assinatura {}: offset={}, encontradas={}, total acumulado={}",
+                            subscriptionId, offset, data.size(), todasCobrancas.size());
+
+                    Boolean hasMore = (Boolean) response.get("hasMore");
+                    if (hasMore == null || !hasMore) {
+                        temMais = false;
+                    } else {
+                        currentOffset += limit;
+                    }
+                }
+            }
+
+            log.info("Total de cobranças da assinatura {}: {}", subscriptionId, todasCobrancas.size());
+            return todasCobrancas;
+        } catch (org.springframework.web.reactive.function.client.WebClientResponseException.NotFound e) {
+            log.warn("Assinatura {} não encontrada no Asaas (404).", subscriptionId);
+            return todasCobrancas;
+        } catch (Exception e) {
+            log.error("Erro ao listar cobranças da assinatura {} no Asaas", subscriptionId, e);
+            return todasCobrancas;
         }
     }
 

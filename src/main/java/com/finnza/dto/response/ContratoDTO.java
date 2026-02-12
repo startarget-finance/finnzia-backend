@@ -43,10 +43,13 @@ public class ContratoDTO {
     
     /**
      * Enum para categoria do contrato (mutuamente exclusivo)
+     * Inadimplente = 2+ parcelas em atraso
+     * Em Atraso = exatamente 1 parcela em atraso
      */
     public enum CategoriaContrato {
         EM_DIA,
         PENDENTE,
+        EM_ATRASO,
         INADIMPLENTE
     }
 
@@ -76,6 +79,7 @@ public class ContratoDTO {
         private String linkPagamento;
         private String codigoBarras;
         private Integer numeroParcela;
+        private String asaasPaymentId;
     }
 }
 

@@ -485,6 +485,15 @@ public class ContratoService {
             contrato.getCobrancas().size(); // Força o carregamento do lazy collection
         }
         
+        // Se o contrato tem asaasSubscriptionId mas não tem cobranças, importar do Asaas
+        if (sincronizarComAsaas && !asaasService.isMockEnabled() 
+                && contrato.getAsaasSubscriptionId() != null && !contrato.getAsaasSubscriptionId().isEmpty()
+                && (contrato.getCobrancas() == null || contrato.getCobrancas().isEmpty())) {
+            log.info("Contrato {} tem subscriptionId {} mas 0 cobranças. Importando do Asaas...", 
+                    contrato.getId(), contrato.getAsaasSubscriptionId());
+            importarCobrancasDoAsaas(contrato);
+        }
+        
         // Sincronizar cobranças com Asaas apenas se solicitado e não estiver em modo mock
         if (sincronizarComAsaas && !asaasService.isMockEnabled() && contrato.getCobrancas() != null && !contrato.getCobrancas().isEmpty()) {
             log.debug("Sincronizando cobranças do contrato {} com Asaas", contrato.getId());
@@ -589,6 +598,91 @@ public class ContratoService {
         
         if (algumaCobrancaAtualizada) {
             log.info("Cobranças do contrato {} sincronizadas com Asaas", contrato.getId());
+        }
+    }
+
+    /**
+     * Importa cobranças do Asaas para um contrato que tem asaasSubscriptionId mas não tem cobranças.
+     * Isso pode acontecer se a importação original falhou (ex: rate limit 429).
+     */
+    private void importarCobrancasDoAsaas(Contrato contrato) {
+        try {
+            java.util.List<Map<String, Object>> cobrancasAsaas = asaasService.listarCobrancasPorAssinatura(contrato.getAsaasSubscriptionId());
+            
+            if (cobrancasAsaas == null || cobrancasAsaas.isEmpty()) {
+                log.warn("Nenhuma cobrança encontrada no Asaas para assinatura {}", contrato.getAsaasSubscriptionId());
+                return;
+            }
+            
+            log.info("Encontradas {} cobranças no Asaas para assinatura {}", cobrancasAsaas.size(), contrato.getAsaasSubscriptionId());
+            
+            int parcelaIndex = 0;
+            for (Map<String, Object> cobrancaAsaas : cobrancasAsaas) {
+                parcelaIndex++;
+                try {
+                    String paymentId = (String) cobrancaAsaas.get("id");
+                    
+                    // Verificar se essa cobrança já existe no banco
+                    Optional<Cobranca> cobrancaExistente = cobrancaRepository.findByAsaasPaymentId(paymentId);
+                    if (cobrancaExistente.isPresent()) {
+                        log.debug("Cobrança {} já existe, pulando...", paymentId);
+                        continue;
+                    }
+                    
+                    Object cobValorObj = cobrancaAsaas.get("value");
+                    BigDecimal cobValor = cobValorObj != null ? new BigDecimal(cobValorObj.toString()) : BigDecimal.ZERO;
+                    
+                    Object cobDueDateObj = cobrancaAsaas.get("dueDate");
+                    LocalDate cobDataVencimento = null;
+                    if (cobDueDateObj != null) {
+                        String dateStr = cobDueDateObj.toString();
+                        if (dateStr.length() >= 10) {
+                            cobDataVencimento = LocalDate.parse(dateStr.substring(0, 10));
+                        }
+                    }
+                    
+                    Object cobPaymentDateObj = cobrancaAsaas.get("paymentDate");
+                    LocalDate cobDataPagamento = null;
+                    if (cobPaymentDateObj != null) {
+                        String dateStr = cobPaymentDateObj.toString();
+                        if (dateStr.length() >= 10) {
+                            cobDataPagamento = LocalDate.parse(dateStr.substring(0, 10));
+                        }
+                    }
+                    
+                    String statusStr = (String) cobrancaAsaas.get("status");
+                    Cobranca.StatusCobranca status = mapearStatusCobranca(statusStr);
+                    
+                    Object installmentObj = cobrancaAsaas.get("installmentNumber");
+                    Integer numeroParcela = installmentObj != null ? Integer.valueOf(installmentObj.toString()) : parcelaIndex;
+                    
+                    Cobranca cobranca = Cobranca.builder()
+                            .contrato(contrato)
+                            .valor(cobValor)
+                            .dataVencimento(cobDataVencimento != null ? cobDataVencimento : contrato.getDataVencimento())
+                            .dataPagamento(cobDataPagamento)
+                            .status(status)
+                            .asaasPaymentId(paymentId)
+                            .linkPagamento((String) cobrancaAsaas.get("invoiceUrl"))
+                            .codigoBarras((String) cobrancaAsaas.get("nossoNumero"))
+                            .numeroParcela(numeroParcela)
+                            .build();
+                    
+                    contrato.adicionarCobranca(cobranca);
+                    log.debug("Parcela {}/{} importada: paymentId={}, status={}, valor={}", 
+                            numeroParcela, cobrancasAsaas.size(), paymentId, statusStr, cobValor);
+                } catch (Exception e) {
+                    log.warn("Erro ao importar cobrança da assinatura {}: {}", contrato.getAsaasSubscriptionId(), e.getMessage());
+                }
+            }
+            
+            // Salvar contrato com as novas cobranças
+            contratoRepository.save(contrato);
+            log.info("✓ {} cobranças importadas para contrato {} (assinatura {})", 
+                    contrato.getCobrancas().size(), contrato.getId(), contrato.getAsaasSubscriptionId());
+                    
+        } catch (Exception e) {
+            log.error("Erro ao importar cobranças do Asaas para contrato {}: {}", contrato.getId(), e.getMessage());
         }
     }
 
@@ -804,8 +898,8 @@ public class ContratoService {
             return ContratoDTO.CategoriaContrato.EM_ATRASO;
         }
         
-        // Contrato assinado com data vencida (sem cobranças em atraso)
-        if (contrato.getStatus() == Contrato.StatusContrato.ASSINADO) {
+        // Contrato em dia com data vencida (sem cobranças em atraso)
+        if (contrato.getStatus() == Contrato.StatusContrato.EM_DIA) {
             if (contrato.getDataVencimento() != null && contrato.getDataVencimento().isBefore(hoje)) {
                 return ContratoDTO.CategoriaContrato.EM_ATRASO;
             }
@@ -846,7 +940,7 @@ public class ContratoService {
             }
         }
         
-        if (contrato.getStatus() == Contrato.StatusContrato.ASSINADO) {
+        if (contrato.getStatus() == Contrato.StatusContrato.EM_DIA) {
             if (contrato.getDataVencimento() != null && !contrato.getDataVencimento().isBefore(hoje)) {
                 return ContratoDTO.CategoriaContrato.EM_DIA;
             }

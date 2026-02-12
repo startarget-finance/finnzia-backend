@@ -145,5 +145,17 @@ public class ContratoController {
         Map<String, Object> totais = contratoService.getTotaisPorCategoria();
         return ResponseEntity.ok(totais);
     }
+
+    /**
+     * Re-sincroniza TODOS os contratos com o Asaas.
+     * Consulta cada cobrança na API do Asaas e atualiza o status local.
+     * Útil para corrigir status desatualizados (ex: cobranças pagas que estão como PENDING).
+     */
+    @PostMapping("/sincronizar-todos")
+    @PreAuthorize("hasPermission(null, 'CONTRATOS')")
+    public ResponseEntity<Map<String, Object>> sincronizarTodosComAsaas() {
+        Map<String, Object> resultado = contratoService.sincronizarTodosComAsaas();
+        return ResponseEntity.ok(resultado);
+    }
 }
 

@@ -146,10 +146,9 @@ public class AsaasWebhookController {
             cobranca.setStatus(status);
 
             // Se foi pago, atualizar data de pagamento
-            if (status == Cobranca.StatusCobranca.RECEIVED || 
-                status == Cobranca.StatusCobranca.RECEIVED_IN_CASH_UNDONE ||
-                status == Cobranca.StatusCobranca.DUNNING_RECEIVED) {
-                
+            // Usa o helper isPaga() que cobre RECEIVED, RECEIVED_IN_CASH_UNDONE e DUNNING_RECEIVED
+            // O mapearStatus já converte CONFIRMED e RECEIVED_IN_CASH para RECEIVED
+            if (cobranca.isPaga()) {
                 Object paymentDate = payment.get("paymentDate");
                 if (paymentDate != null) {
                     String dateStr = paymentDate.toString();
@@ -192,18 +191,62 @@ public class AsaasWebhookController {
     }
 
     /**
-     * Mapeia status do Asaas para nosso enum
+     * Mapeia status do Asaas para nosso enum.
+     * Mapeamento explícito para evitar perda de status como CONFIRMED e RECEIVED_IN_CASH
+     * que não existem no nosso enum mas significam "pago".
+     * 
+     * Status do Asaas: PENDING, RECEIVED, CONFIRMED, OVERDUE, REFUNDED,
+     *   RECEIVED_IN_CASH, REFUND_REQUESTED, REFUND_IN_PROGRESS,
+     *   CHARGEBACK_REQUESTED, CHARGEBACK_DISPUTE, AWAITING_CHARGEBACK_REVERSAL,
+     *   DUNNING_REQUESTED, DUNNING_RECEIVED, AWAITING_RISK_ANALYSIS
      */
     private Cobranca.StatusCobranca mapearStatus(String statusAsaas) {
         if (statusAsaas == null) {
             return Cobranca.StatusCobranca.PENDING;
         }
 
-        try {
-            return Cobranca.StatusCobranca.valueOf(statusAsaas);
-        } catch (IllegalArgumentException e) {
-            log.warn("Status desconhecido do Asaas: {}", statusAsaas);
-            return Cobranca.StatusCobranca.PENDING;
+        switch (statusAsaas.toUpperCase()) {
+            // === PAGOS ===
+            case "RECEIVED":
+                return Cobranca.StatusCobranca.RECEIVED;
+            case "CONFIRMED":
+                // Pagamento confirmado (cartão, PIX, etc.) — é PAGO
+                return Cobranca.StatusCobranca.RECEIVED;
+            case "RECEIVED_IN_CASH":
+                // Pagamento recebido em dinheiro/manual — é PAGO
+                return Cobranca.StatusCobranca.RECEIVED;
+            case "DUNNING_RECEIVED":
+                return Cobranca.StatusCobranca.DUNNING_RECEIVED;
+
+            // === PENDENTES ===
+            case "PENDING":
+                return Cobranca.StatusCobranca.PENDING;
+            case "AWAITING_RISK_ANALYSIS":
+                return Cobranca.StatusCobranca.AWAITING_RISK_ANALYSIS;
+
+            // === VENCIDOS ===
+            case "OVERDUE":
+                return Cobranca.StatusCobranca.OVERDUE;
+            case "DUNNING_REQUESTED":
+                return Cobranca.StatusCobranca.DUNNING_REQUESTED;
+
+            // === ESTORNOS/CHARGEBACKS ===
+            case "REFUNDED":
+            case "REFUND_REQUESTED":
+            case "REFUND_IN_PROGRESS":
+                return Cobranca.StatusCobranca.REFUNDED;
+            case "CHARGEBACK_REQUESTED":
+                return Cobranca.StatusCobranca.CHARGEBACK_REQUESTED;
+            case "CHARGEBACK_DISPUTE":
+                return Cobranca.StatusCobranca.CHARGEBACK_DISPUTE;
+            case "AWAITING_CHARGEBACK_REVERSAL":
+                return Cobranca.StatusCobranca.AWAITING_CHARGEBACK_REVERSAL;
+            case "RECEIVED_IN_CASH_UNDONE":
+                return Cobranca.StatusCobranca.RECEIVED_IN_CASH_UNDONE;
+
+            default:
+                log.warn("Status desconhecido do Asaas no webhook: '{}'. Mapeando como PENDING.", statusAsaas);
+                return Cobranca.StatusCobranca.PENDING;
         }
     }
 }

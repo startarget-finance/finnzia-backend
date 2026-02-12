@@ -364,6 +364,14 @@ public class ContratoService {
                 if (cobranca.getAsaasPaymentId() != null && !cobranca.getAsaasPaymentId().isEmpty()) {
                     try {
                         Map<String, Object> paymentData = asaasService.consultarCobranca(cobranca.getAsaasPaymentId());
+                        
+                        // Se retornou null, a cobrança não existe mais no Asaas (404)
+                        if (paymentData == null) {
+                            log.warn("Cobrança {} (Asaas: {}) não encontrada no Asaas. Mantendo status local.", 
+                                    cobranca.getId(), cobranca.getAsaasPaymentId());
+                            continue;
+                        }
+                        
                         String statusAsaas = (String) paymentData.get("status");
                         
                         // Atualizar status da cobrança
@@ -387,7 +395,7 @@ public class ContratoService {
                         cobrancaRepository.save(cobranca);
                         log.info("Cobrança {} sincronizada com Asaas. Status: {}", cobranca.getId(), statusAsaas);
                     } catch (Exception e) {
-                        log.error("Erro ao sincronizar cobrança {} com Asaas", cobranca.getId(), e);
+                        log.warn("Erro ao sincronizar cobrança {} com Asaas: {}", cobranca.getId(), e.getMessage());
                     }
                 }
             }
@@ -403,18 +411,63 @@ public class ContratoService {
     }
 
     /**
-     * Mapeia status do Asaas para enum de cobrança
+     * Mapeia status do Asaas para enum de cobrança.
+     * O Asaas pode retornar status que não existem diretamente no nosso enum,
+     * como CONFIRMED e RECEIVED_IN_CASH. Mapeamento explícito para evitar perda de status.
+     * 
+     * Status do Asaas: PENDING, RECEIVED, CONFIRMED, OVERDUE, REFUNDED, 
+     *   RECEIVED_IN_CASH, REFUND_REQUESTED, REFUND_IN_PROGRESS,
+     *   CHARGEBACK_REQUESTED, CHARGEBACK_DISPUTE, AWAITING_CHARGEBACK_REVERSAL,
+     *   DUNNING_REQUESTED, DUNNING_RECEIVED, AWAITING_RISK_ANALYSIS
      */
     private Cobranca.StatusCobranca mapearStatusCobranca(String statusAsaas) {
         if (statusAsaas == null) {
             return Cobranca.StatusCobranca.PENDING;
         }
 
-        try {
-            return Cobranca.StatusCobranca.valueOf(statusAsaas);
-        } catch (IllegalArgumentException e) {
-            log.warn("Status desconhecido do Asaas: {}", statusAsaas);
-            return Cobranca.StatusCobranca.PENDING;
+        switch (statusAsaas.toUpperCase()) {
+            // === PAGOS ===
+            case "RECEIVED":
+                return Cobranca.StatusCobranca.RECEIVED;
+            case "CONFIRMED":
+                // Asaas retorna CONFIRMED para pagamentos confirmados (cartão de crédito, PIX, etc.)
+                // Deve ser tratado como PAGO
+                return Cobranca.StatusCobranca.RECEIVED;
+            case "RECEIVED_IN_CASH":
+                // Pagamento recebido em dinheiro/manual
+                return Cobranca.StatusCobranca.RECEIVED;
+            case "DUNNING_RECEIVED":
+                return Cobranca.StatusCobranca.DUNNING_RECEIVED;
+            
+            // === PENDENTES ===
+            case "PENDING":
+                return Cobranca.StatusCobranca.PENDING;
+            case "AWAITING_RISK_ANALYSIS":
+                return Cobranca.StatusCobranca.AWAITING_RISK_ANALYSIS;
+            
+            // === VENCIDOS ===
+            case "OVERDUE":
+                return Cobranca.StatusCobranca.OVERDUE;
+            case "DUNNING_REQUESTED":
+                return Cobranca.StatusCobranca.DUNNING_REQUESTED;
+            
+            // === ESTORNOS/CHARGEBACKS ===
+            case "REFUNDED":
+            case "REFUND_REQUESTED":
+            case "REFUND_IN_PROGRESS":
+                return Cobranca.StatusCobranca.REFUNDED;
+            case "CHARGEBACK_REQUESTED":
+                return Cobranca.StatusCobranca.CHARGEBACK_REQUESTED;
+            case "CHARGEBACK_DISPUTE":
+                return Cobranca.StatusCobranca.CHARGEBACK_DISPUTE;
+            case "AWAITING_CHARGEBACK_REVERSAL":
+                return Cobranca.StatusCobranca.AWAITING_CHARGEBACK_REVERSAL;
+            case "RECEIVED_IN_CASH_UNDONE":
+                return Cobranca.StatusCobranca.RECEIVED_IN_CASH_UNDONE;
+            
+            default:
+                log.warn("Status desconhecido do Asaas: '{}'. Mapeando como PENDING.", statusAsaas);
+                return Cobranca.StatusCobranca.PENDING;
         }
     }
 
@@ -491,6 +544,14 @@ public class ContratoService {
                 if (deveSincronizar) {
                     try {
                         Map<String, Object> paymentData = asaasService.consultarCobranca(cobranca.getAsaasPaymentId());
+                        
+                        // Se retornou null, a cobrança não existe mais no Asaas (404)
+                        if (paymentData == null) {
+                            log.warn("Cobrança {} (Asaas: {}) não encontrada no Asaas. Mantendo status local: {}", 
+                                    cobranca.getId(), cobranca.getAsaasPaymentId(), cobranca.getStatus());
+                            continue;
+                        }
+                        
                         String statusAsaas = (String) paymentData.get("status");
                         
                         // Atualizar status da cobrança se mudou
@@ -671,6 +732,7 @@ public class ContratoService {
                         .linkPagamento(c.getLinkPagamento())
                         .codigoBarras(c.getCodigoBarras())
                         .numeroParcela(c.getNumeroParcela())
+                        .asaasPaymentId(c.getAsaasPaymentId())
                         .build())
                 .collect(Collectors.toList());
 
@@ -698,44 +760,54 @@ public class ContratoService {
     }
     
     /**
+     * Conta quantas parcelas (cobranças) estão em atraso para um contrato.
+     * Parcela em atraso = OVERDUE, DUNNING_REQUESTED, CHARGEBACK_REQUESTED
+     * ou PENDING com data de vencimento no passado.
+     */
+    private long contarParcelasEmAtraso(Contrato contrato) {
+        LocalDate hoje = LocalDate.now();
+        if (contrato.getCobrancas() == null || contrato.getCobrancas().isEmpty()) {
+            return 0;
+        }
+        return contrato.getCobrancas().stream().filter(cob -> 
+            cob.getStatus() == Cobranca.StatusCobranca.OVERDUE || 
+            cob.getStatus() == Cobranca.StatusCobranca.DUNNING_REQUESTED ||
+            cob.getStatus() == Cobranca.StatusCobranca.CHARGEBACK_REQUESTED ||
+            (cob.getStatus() == Cobranca.StatusCobranca.PENDING && 
+             cob.getDataVencimento() != null && cob.getDataVencimento().isBefore(hoje))
+        ).count();
+    }
+    
+    /**
      * Calcula a categoria do contrato (mutuamente exclusivo)
-     * Prioridade: INADIMPLENTE > EM_DIA > PENDENTE
+     * Prioridade: INADIMPLENTE (2+ parcelas em atraso) > EM_ATRASO (1 parcela em atraso) > EM_DIA > PENDENTE
      */
     private ContratoDTO.CategoriaContrato calcularCategoria(Contrato contrato) {
         LocalDate hoje = LocalDate.now();
         
-        // PRIORIDADE 1: Inadimplentes (qualquer coisa vencida)
-        if (contrato.getStatus() == Contrato.StatusContrato.VENCIDO) {
+        // Contar parcelas em atraso
+        long parcelasEmAtraso = contarParcelasEmAtraso(contrato);
+        
+        // INADIMPLENTE = 2 ou mais parcelas em atraso
+        if (parcelasEmAtraso >= 2) {
             return ContratoDTO.CategoriaContrato.INADIMPLENTE;
         }
         
-        if (contrato.getCobrancas() != null && !contrato.getCobrancas().isEmpty()) {
-            // Cobranças OVERDUE ou com problemas graves
-            boolean temVencida = contrato.getCobrancas().stream().anyMatch(cob -> 
-                cob.getStatus() == Cobranca.StatusCobranca.OVERDUE || 
-                cob.getStatus() == Cobranca.StatusCobranca.DUNNING_REQUESTED ||
-                cob.getStatus() == Cobranca.StatusCobranca.CHARGEBACK_REQUESTED
-            );
-            if (temVencida) {
-                return ContratoDTO.CategoriaContrato.INADIMPLENTE;
-            }
-            
-            // Cobranças PENDING vencidas (qualquer tempo)
-            boolean temPendenteVencida = contrato.getCobrancas().stream().anyMatch(cob -> {
-                if (cob.getStatus() == Cobranca.StatusCobranca.PENDING && cob.getDataVencimento() != null) {
-                    return cob.getDataVencimento().isBefore(hoje);
-                }
-                return false;
-            });
-            if (temPendenteVencida) {
-                return ContratoDTO.CategoriaContrato.INADIMPLENTE;
-            }
+        // EM_ATRASO = exatamente 1 parcela em atraso
+        if (parcelasEmAtraso == 1) {
+            return ContratoDTO.CategoriaContrato.EM_ATRASO;
         }
         
-        // Contrato assinado vencido (qualquer tempo)
+        // Se o status é VENCIDO mas não tem cobranças em atraso (caso sem cobranças),
+        // considerar como EM_ATRASO (1 atraso genérico do contrato)
+        if (contrato.getStatus() == Contrato.StatusContrato.VENCIDO) {
+            return ContratoDTO.CategoriaContrato.EM_ATRASO;
+        }
+        
+        // Contrato assinado com data vencida (sem cobranças em atraso)
         if (contrato.getStatus() == Contrato.StatusContrato.ASSINADO) {
             if (contrato.getDataVencimento() != null && contrato.getDataVencimento().isBefore(hoje)) {
-                return ContratoDTO.CategoriaContrato.INADIMPLENTE;
+                return ContratoDTO.CategoriaContrato.EM_ATRASO;
             }
         }
         
@@ -799,10 +871,12 @@ public class ContratoService {
         
         long emDia = 0;
         long pendente = 0;
+        long emAtraso = 0;
         long inadimplente = 0;
         
         BigDecimal valorEmDia = BigDecimal.ZERO;
         BigDecimal valorPendente = BigDecimal.ZERO;
+        BigDecimal valorEmAtraso = BigDecimal.ZERO;
         BigDecimal valorInadimplente = BigDecimal.ZERO;
         
         for (Contrato contrato : todosContratos) {
@@ -821,6 +895,10 @@ public class ContratoService {
                     pendente++;
                     valorPendente = valorPendente.add(valorContrato);
                     break;
+                case EM_ATRASO:
+                    emAtraso++;
+                    valorEmAtraso = valorEmAtraso.add(valorContrato);
+                    break;
                 case INADIMPLENTE:
                     inadimplente++;
                     valorInadimplente = valorInadimplente.add(valorContrato);
@@ -833,12 +911,118 @@ public class ContratoService {
         totais.put("totalValor", totalValor);
         totais.put("emDia", emDia);
         totais.put("pendente", pendente);
+        totais.put("emAtraso", emAtraso);
         totais.put("inadimplente", inadimplente);
         totais.put("valorEmDia", valorEmDia);
         totais.put("valorPendente", valorPendente);
+        totais.put("valorEmAtraso", valorEmAtraso);
         totais.put("valorInadimplente", valorInadimplente);
         
         return totais;
+    }
+
+    /**
+     * Re-sincroniza TODOS os contratos com o Asaas.
+     * Consulta cada cobrança na API do Asaas e atualiza o status local.
+     * Corrige cobranças que foram marcadas incorretamente (ex: CONFIRMED → RECEIVED).
+     */
+    @Transactional
+    public Map<String, Object> sincronizarTodosComAsaas() {
+        log.info("=== INICIANDO SINCRONIZAÇÃO TOTAL COM ASAAS ===");
+        
+        List<Contrato> todosContratos = contratoRepository.findAllNaoDeletados();
+        int totalContratos = todosContratos.size();
+        int contratosAtualizados = 0;
+        int cobrancasAtualizadas = 0;
+        int erros = 0;
+        
+        for (Contrato contrato : todosContratos) {
+            try {
+                // Forçar carregamento das cobranças
+                if (contrato.getCobrancas() != null) {
+                    contrato.getCobrancas().size();
+                }
+                
+                boolean contratoAtualizado = false;
+                
+                if (contrato.getCobrancas() != null && !contrato.getCobrancas().isEmpty()) {
+                    for (Cobranca cobranca : contrato.getCobrancas()) {
+                        if (cobranca.getAsaasPaymentId() != null && !cobranca.getAsaasPaymentId().isEmpty()) {
+                            try {
+                                Map<String, Object> paymentData = asaasService.consultarCobranca(cobranca.getAsaasPaymentId());
+                                
+                                if (paymentData == null) {
+                                    log.debug("Cobrança {} não encontrada no Asaas (404). Mantendo status local.", cobranca.getAsaasPaymentId());
+                                    continue;
+                                }
+                                
+                                String statusAsaas = (String) paymentData.get("status");
+                                Cobranca.StatusCobranca novoStatus = mapearStatusCobranca(statusAsaas);
+                                
+                                if (cobranca.getStatus() != novoStatus) {
+                                    log.info("Cobrança {} (Asaas: {}): {} → {} (Asaas retornou: '{}')", 
+                                            cobranca.getId(), cobranca.getAsaasPaymentId(), 
+                                            cobranca.getStatus(), novoStatus, statusAsaas);
+                                    cobranca.setStatus(novoStatus);
+                                    contratoAtualizado = true;
+                                    cobrancasAtualizadas++;
+                                }
+                                
+                                // Atualizar data de pagamento se foi pago
+                                if (cobranca.isPaga() && cobranca.getDataPagamento() == null) {
+                                    Object paymentDate = paymentData.get("paymentDate");
+                                    if (paymentDate != null) {
+                                        String dateStr = paymentDate.toString();
+                                        if (dateStr.length() >= 10) {
+                                            cobranca.setDataPagamento(LocalDate.parse(dateStr.substring(0, 10)));
+                                            contratoAtualizado = true;
+                                        }
+                                    }
+                                }
+                                
+                                // Atualizar link de pagamento se não tiver
+                                if (cobranca.getLinkPagamento() == null || cobranca.getLinkPagamento().isEmpty()) {
+                                    String invoiceUrl = (String) paymentData.get("invoiceUrl");
+                                    if (invoiceUrl != null && !invoiceUrl.isEmpty()) {
+                                        cobranca.setLinkPagamento(invoiceUrl);
+                                        contratoAtualizado = true;
+                                    }
+                                }
+                                
+                                cobrancaRepository.save(cobranca);
+                            } catch (Exception e) {
+                                log.warn("Erro ao sincronizar cobrança {} com Asaas: {}", cobranca.getId(), e.getMessage());
+                                erros++;
+                            }
+                        }
+                    }
+                }
+                
+                if (contratoAtualizado) {
+                    contrato.calcularStatusBaseadoNasCobrancas();
+                    contratoRepository.save(contrato);
+                    contratosAtualizados++;
+                }
+            } catch (Exception e) {
+                log.error("Erro ao sincronizar contrato {}: {}", contrato.getId(), e.getMessage());
+                erros++;
+            }
+        }
+        
+        log.info("=== SINCRONIZAÇÃO TOTAL CONCLUÍDA ===");
+        log.info("Contratos processados: {}, atualizados: {}", totalContratos, contratosAtualizados);
+        log.info("Cobranças atualizadas: {}, erros: {}", cobrancasAtualizadas, erros);
+        
+        Map<String, Object> resultado = new java.util.HashMap<>();
+        resultado.put("totalContratos", totalContratos);
+        resultado.put("contratosAtualizados", contratosAtualizados);
+        resultado.put("cobrancasAtualizadas", cobrancasAtualizadas);
+        resultado.put("erros", erros);
+        resultado.put("mensagem", String.format(
+            "Sincronização concluída: %d contratos processados, %d atualizados, %d cobranças corrigidas, %d erros",
+            totalContratos, contratosAtualizados, cobrancasAtualizadas, erros));
+        
+        return resultado;
     }
 
     /**
@@ -940,16 +1124,28 @@ public class ContratoService {
                     contratosImportados, erros, assinaturasProcessadas - contratosImportados - erros);
 
             // Buscar cobranças únicas (payments) do Asaas
+            // IMPORTANTE: Pular cobranças que pertencem a uma assinatura (já foram importadas no passo anterior)
             java.util.List<Map<String, Object>> cobrancas = asaasService.listarCobrancas();
             log.info("Encontradas {} cobranças no Asaas para importar", cobrancas.size());
 
+            int cobrancasPuladas = 0;
             for (Map<String, Object> cobrancaAsaas : cobrancas) {
                 cobrancasProcessadas++;
                 try {
                     String paymentId = (String) cobrancaAsaas.get("id");
                     String customerId = (String) cobrancaAsaas.get("customer");
                     
-                    log.debug("Processando cobrança {}: paymentId={}, customerId={}", 
+                    // PULAR cobranças que pertencem a uma assinatura
+                    // Essas já foram importadas como parcelas do contrato recorrente
+                    String subscriptionId = (String) cobrancaAsaas.get("subscription");
+                    if (subscriptionId != null && !subscriptionId.isEmpty()) {
+                        cobrancasPuladas++;
+                        log.debug("Cobrança {} pertence à assinatura {}, pulando (já importada como parcela).", 
+                                paymentId, subscriptionId);
+                        continue;
+                    }
+                    
+                    log.debug("Processando cobrança avulsa {}: paymentId={}, customerId={}", 
                             cobrancasProcessadas, paymentId, customerId);
                     
                     if (paymentId == null || paymentId.isEmpty()) {
@@ -990,7 +1186,7 @@ public class ContratoService {
                         cliente = criarClienteImportado(clienteAsaas, customerId, cpfCnpj);
                     }
 
-                    // Criar contrato e cobrança em transação separada
+                    // Criar contrato e cobrança em transação separada (apenas para cobranças AVULSAS)
                     boolean sucesso = criarContratoUnicoImportado(cobrancaAsaas, cliente, paymentId);
                     if (sucesso) {
                         contratosImportados++;
@@ -1000,6 +1196,8 @@ public class ContratoService {
                     log.error("✗ Erro ao importar cobrança {}: {}", cobrancaAsaas.get("id"), e.getMessage(), e);
                 }
             }
+            
+            log.info("Cobranças avulsas processadas. {} puladas (pertenciam a assinaturas)", cobrancasPuladas);
 
             log.info("=== IMPORTAÇÃO CONCLUÍDA ===");
             log.info("Total de contratos importados: {}", contratosImportados);
@@ -1029,17 +1227,19 @@ public class ContratoService {
     }
 
     /**
-     * Cria contrato recorrente importado em transação separada
+     * Cria contrato recorrente importado em transação separada.
+     * Busca TODAS as cobranças (payments) da assinatura no Asaas e as cria como Cobranca vinculadas ao contrato.
+     * Isso garante que todas as parcelas fiquem agrupadas sob um único contrato.
      */
     @Transactional(propagation = org.springframework.transaction.annotation.Propagation.REQUIRES_NEW)
     private Contrato criarContratoRecorrenteImportado(Map<String, Object> assinatura, Cliente cliente, String subscriptionId) {
         try {
             Object valorObj = assinatura.get("value");
-            BigDecimal valor = valorObj != null ? new BigDecimal(valorObj.toString()) : BigDecimal.ZERO;
+            BigDecimal valorParcela = valorObj != null ? new BigDecimal(valorObj.toString()) : BigDecimal.ZERO;
             
             // Garantir que valor seja pelo menos 0.01 para evitar problemas com valores zero
-            if (valor.compareTo(BigDecimal.ZERO) <= 0) {
-                valor = BigDecimal.valueOf(0.01);
+            if (valorParcela.compareTo(BigDecimal.ZERO) <= 0) {
+                valorParcela = BigDecimal.valueOf(0.01);
             }
             
             Object nextDueDateObj = assinatura.get("nextDueDate");
@@ -1057,19 +1257,117 @@ public class ContratoService {
                 titulo = "Contrato Recorrente - " + cliente.getRazaoSocial();
             }
 
+            // Buscar todas as cobranças dessa assinatura no Asaas
+            java.util.List<Map<String, Object>> cobrancasAsaas = asaasService.listarCobrancasPorAssinatura(subscriptionId);
+            log.info("Assinatura {} possui {} cobranças no Asaas", subscriptionId, cobrancasAsaas.size());
+
+            // Calcular valor total do contrato (valor da parcela × número de parcelas)
+            int totalParcelas = cobrancasAsaas.isEmpty() ? 1 : cobrancasAsaas.size();
+            BigDecimal valorTotal = valorParcela.multiply(BigDecimal.valueOf(totalParcelas));
+
+            // Determinar a data de vencimento: a próxima cobrança pendente/overdue, ou nextDueDate
+            LocalDate dataVencimentoFinal = dataVencimento;
+            if (dataVencimentoFinal == null && !cobrancasAsaas.isEmpty()) {
+                // Usar a data da primeira cobrança
+                Object firstDueDate = cobrancasAsaas.get(0).get("dueDate");
+                if (firstDueDate != null) {
+                    String dateStr = firstDueDate.toString();
+                    if (dateStr.length() >= 10) {
+                        dataVencimentoFinal = LocalDate.parse(dateStr.substring(0, 10));
+                    }
+                }
+            }
+
             Contrato contrato = Contrato.builder()
                     .titulo(titulo)
-                    .descricao("Contrato importado do Asaas")
+                    .descricao("Contrato importado do Asaas - Parcelado em " + totalParcelas + "x de R$ " + valorParcela)
                     .cliente(cliente)
-                    .valorContrato(valor) // Obrigatório: usar o valor da recorrência como valor do contrato
-                    .valorRecorrencia(valor)
-                    .dataVencimento(dataVencimento != null ? dataVencimento : LocalDate.now().plusMonths(1))
+                    .valorContrato(valorTotal)
+                    .valorRecorrencia(valorParcela)
+                    .dataVencimento(dataVencimentoFinal != null ? dataVencimentoFinal : LocalDate.now().plusMonths(1))
                     .status(Contrato.StatusContrato.PENDENTE)
                     .tipoPagamento(Contrato.TipoPagamento.RECORRENTE)
                     .asaasSubscriptionId(subscriptionId)
                     .build();
 
-            return contratoRepository.save(contrato);
+            contrato = contratoRepository.save(contrato);
+
+            // Criar cobranças (parcelas) vinculadas ao contrato
+            int parcelaIndex = 0;
+            for (Map<String, Object> cobrancaAsaas : cobrancasAsaas) {
+                parcelaIndex++;
+                try {
+                    String paymentId = (String) cobrancaAsaas.get("id");
+                    
+                    // Verificar se essa cobrança já existe no banco
+                    Optional<Cobranca> cobrancaExistente = cobrancaRepository.findByAsaasPaymentId(paymentId);
+                    if (cobrancaExistente.isPresent()) {
+                        log.debug("Cobrança {} já existe, pulando...", paymentId);
+                        continue;
+                    }
+                    
+                    Object cobValorObj = cobrancaAsaas.get("value");
+                    BigDecimal cobValor = cobValorObj != null ? new BigDecimal(cobValorObj.toString()) : valorParcela;
+                    
+                    Object cobDueDateObj = cobrancaAsaas.get("dueDate");
+                    LocalDate cobDataVencimento = null;
+                    if (cobDueDateObj != null) {
+                        String dateStr = cobDueDateObj.toString();
+                        if (dateStr.length() >= 10) {
+                            cobDataVencimento = LocalDate.parse(dateStr.substring(0, 10));
+                        }
+                    }
+                    
+                    // Data de pagamento (se paga)
+                    Object cobPaymentDateObj = cobrancaAsaas.get("paymentDate");
+                    LocalDate cobDataPagamento = null;
+                    if (cobPaymentDateObj != null) {
+                        String dateStr = cobPaymentDateObj.toString();
+                        if (dateStr.length() >= 10) {
+                            cobDataPagamento = LocalDate.parse(dateStr.substring(0, 10));
+                        }
+                    }
+                    
+                    String statusStr = (String) cobrancaAsaas.get("status");
+                    Cobranca.StatusCobranca status = mapearStatusCobranca(statusStr);
+                    
+                    // Tentar obter o número da parcela do Asaas (installmentNumber)
+                    Object installmentObj = cobrancaAsaas.get("installmentNumber");
+                    Integer numeroParcela = null;
+                    if (installmentObj != null) {
+                        numeroParcela = Integer.valueOf(installmentObj.toString());
+                    } else {
+                        numeroParcela = parcelaIndex;
+                    }
+                    
+                    Cobranca cobranca = Cobranca.builder()
+                            .contrato(contrato)
+                            .valor(cobValor)
+                            .dataVencimento(cobDataVencimento != null ? cobDataVencimento : contrato.getDataVencimento())
+                            .dataPagamento(cobDataPagamento)
+                            .status(status)
+                            .asaasPaymentId(paymentId)
+                            .linkPagamento((String) cobrancaAsaas.get("invoiceUrl"))
+                            .codigoBarras((String) cobrancaAsaas.get("nossoNumero"))
+                            .numeroParcela(numeroParcela)
+                            .build();
+                    
+                    contrato.adicionarCobranca(cobranca);
+                    log.debug("Parcela {}/{} adicionada: paymentId={}, status={}, valor={}", 
+                            numeroParcela, totalParcelas, paymentId, statusStr, cobValor);
+                } catch (Exception e) {
+                    log.warn("Erro ao criar cobrança da assinatura {}: {}", subscriptionId, e.getMessage());
+                }
+            }
+            
+            // Recalcular status do contrato baseado nas cobranças importadas
+            contrato.calcularStatusBaseadoNasCobrancas();
+            contrato = contratoRepository.save(contrato);
+            
+            log.info("✓ Contrato recorrente importado: ID={}, {} parcelas, valorTotal={}, status={}", 
+                    contrato.getId(), contrato.getCobrancas().size(), valorTotal, contrato.getStatus());
+
+            return contrato;
         } catch (Exception e) {
             log.error("Erro ao criar contrato recorrente importado: {}", e.getMessage(), e);
             return null;
@@ -1077,7 +1375,8 @@ public class ContratoService {
     }
 
     /**
-     * Cria contrato único e cobrança importados em transação separada
+     * Cria contrato único e cobrança importados em transação separada.
+     * Apenas para cobranças avulsas (que não pertencem a uma assinatura).
      */
     @Transactional(propagation = org.springframework.transaction.annotation.Propagation.REQUIRES_NEW)
     private boolean criarContratoUnicoImportado(Map<String, Object> cobrancaAsaas, Cliente cliente, String paymentId) {
@@ -1093,10 +1392,25 @@ public class ContratoService {
                     dataVencimento = LocalDate.parse(dateStr.substring(0, 10));
                 }
             }
+            
+            // Data de pagamento (se paga)
+            Object paymentDateObj = cobrancaAsaas.get("paymentDate");
+            LocalDate dataPagamento = null;
+            if (paymentDateObj != null) {
+                String dateStr = paymentDateObj.toString();
+                if (dateStr.length() >= 10) {
+                    dataPagamento = LocalDate.parse(dateStr.substring(0, 10));
+                }
+            }
+
+            String tituloCobranca = (String) cobrancaAsaas.get("description");
+            if (tituloCobranca == null || tituloCobranca.trim().isEmpty()) {
+                tituloCobranca = "Cobrança Avulsa - " + cliente.getRazaoSocial();
+            }
 
             Contrato contrato = Contrato.builder()
-                    .titulo((String) cobrancaAsaas.get("description"))
-                    .descricao("Contrato único importado do Asaas")
+                    .titulo(tituloCobranca)
+                    .descricao("Cobrança avulsa importada do Asaas")
                     .cliente(cliente)
                     .valorContrato(valor)
                     .dataVencimento(dataVencimento != null ? dataVencimento : LocalDate.now().plusDays(30))
@@ -1114,16 +1428,21 @@ public class ContratoService {
                     .contrato(contrato)
                     .valor(valor)
                     .dataVencimento(dataVencimento)
+                    .dataPagamento(dataPagamento)
                     .status(status)
                     .asaasPaymentId(paymentId)
                     .linkPagamento((String) cobrancaAsaas.get("invoiceUrl"))
-                    .codigoBarras((String) cobrancaAsaas.get("barcode"))
+                    .codigoBarras((String) cobrancaAsaas.get("nossoNumero"))
+                    .numeroParcela(1)
                     .build();
 
-            cobrancaRepository.save(cobranca);
+            contrato.adicionarCobranca(cobranca);
+            // Recalcular status baseado nas cobranças
+            contrato.calcularStatusBaseadoNasCobrancas();
+            contratoRepository.save(contrato);
             
-            log.info("✓ Cobrança única importada com sucesso: ID={}, PaymentId={}, Cliente={}", 
-                    cobranca.getId(), paymentId, cliente.getRazaoSocial());
+            log.info("✓ Cobrança avulsa importada: ID={}, PaymentId={}, Status={}, Cliente={}", 
+                    cobranca.getId(), paymentId, statusStr, cliente.getRazaoSocial());
             return true;
         } catch (Exception e) {
             log.error("Erro ao criar contrato único importado: {}", e.getMessage(), e);

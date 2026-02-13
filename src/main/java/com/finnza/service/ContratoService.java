@@ -895,7 +895,12 @@ public class ContratoService {
     
     /**
      * Calcula a categoria do contrato (mutuamente exclusivo)
-     * Prioridade: INADIMPLENTE (2+ parcelas em atraso) > EM_ATRASO (1 parcela em atraso) > EM_DIA > PENDENTE
+     * Prioridade: INADIMPLENTE (2+ parcelas em atraso) > EM_ATRASO (1 parcela em atraso) > EM_DIA (padrão)
+     * 
+     * Lógica profissional:
+     * - Se não há parcelas em atraso, o contrato está "Em Dia" (mesmo com cobranças pendentes/futuras)
+     * - Se há exatamente 1 parcela em atraso, está "Em Atraso"
+     * - Se há 2+ parcelas em atraso, é "Inadimplente"
      */
     private ContratoDTO.CategoriaContrato calcularCategoria(Contrato contrato) {
         LocalDate hoje = LocalDate.now();
@@ -926,49 +931,9 @@ public class ContratoService {
             }
         }
         
-        // PRIORIDADE 2: Em Dia
-        if (contrato.getStatus() == Contrato.StatusContrato.PAGO) {
-            return ContratoDTO.CategoriaContrato.EM_DIA;
-        }
-        
-        if (contrato.getCobrancas() != null && !contrato.getCobrancas().isEmpty()) {
-            // Todas pagas
-            boolean todasPagas = contrato.getCobrancas().stream().allMatch(cob -> 
-                cob.getStatus() == Cobranca.StatusCobranca.RECEIVED || 
-                cob.getStatus() == Cobranca.StatusCobranca.RECEIVED_IN_CASH_UNDONE || 
-                cob.getStatus() == Cobranca.StatusCobranca.DUNNING_RECEIVED
-            );
-            if (todasPagas) {
-                return ContratoDTO.CategoriaContrato.EM_DIA;
-            }
-            
-            // Pelo menos uma paga
-            boolean temPaga = contrato.getCobrancas().stream().anyMatch(cob -> 
-                cob.getStatus() == Cobranca.StatusCobranca.RECEIVED || 
-                cob.getStatus() == Cobranca.StatusCobranca.RECEIVED_IN_CASH_UNDONE || 
-                cob.getStatus() == Cobranca.StatusCobranca.DUNNING_RECEIVED
-            );
-            if (temPaga) {
-                return ContratoDTO.CategoriaContrato.EM_DIA;
-            }
-            
-            // Todas PENDING e data futura
-            boolean todasPendentes = contrato.getCobrancas().stream()
-                .allMatch(cob -> cob.getStatus() == Cobranca.StatusCobranca.PENDING);
-            if (todasPendentes && contrato.getDataVencimento() != null && 
-                !contrato.getDataVencimento().isBefore(hoje)) {
-                return ContratoDTO.CategoriaContrato.EM_DIA;
-            }
-        }
-        
-        if (contrato.getStatus() == Contrato.StatusContrato.EM_DIA) {
-            if (contrato.getDataVencimento() != null && !contrato.getDataVencimento().isBefore(hoje)) {
-                return ContratoDTO.CategoriaContrato.EM_DIA;
-            }
-        }
-        
-        // PRIORIDADE 4: Pendentes (padrão)
-        return ContratoDTO.CategoriaContrato.PENDENTE;
+        // Tudo que não está em atraso ou inadimplente = EM_DIA
+        // Isso inclui: contratos pagos, com cobranças pendentes/futuras, novos, etc.
+        return ContratoDTO.CategoriaContrato.EM_DIA;
     }
     
     /**
@@ -985,12 +950,10 @@ public class ContratoService {
             .reduce(BigDecimal.ZERO, BigDecimal::add);
         
         long emDia = 0;
-        long pendente = 0;
         long emAtraso = 0;
         long inadimplente = 0;
         
         BigDecimal valorEmDia = BigDecimal.ZERO;
-        BigDecimal valorPendente = BigDecimal.ZERO;
         BigDecimal valorEmAtraso = BigDecimal.ZERO;
         BigDecimal valorInadimplente = BigDecimal.ZERO;
         
@@ -1005,10 +968,6 @@ public class ContratoService {
                 case EM_DIA:
                     emDia++;
                     valorEmDia = valorEmDia.add(valorContrato);
-                    break;
-                case PENDENTE:
-                    pendente++;
-                    valorPendente = valorPendente.add(valorContrato);
                     break;
                 case EM_ATRASO:
                     emAtraso++;
@@ -1025,11 +984,9 @@ public class ContratoService {
         totais.put("totalContratos", totalContratos);
         totais.put("totalValor", totalValor);
         totais.put("emDia", emDia);
-        totais.put("pendente", pendente);
         totais.put("emAtraso", emAtraso);
         totais.put("inadimplente", inadimplente);
         totais.put("valorEmDia", valorEmDia);
-        totais.put("valorPendente", valorPendente);
         totais.put("valorEmAtraso", valorEmAtraso);
         totais.put("valorInadimplente", valorInadimplente);
         

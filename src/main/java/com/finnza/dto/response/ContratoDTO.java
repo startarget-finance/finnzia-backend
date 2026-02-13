@@ -43,12 +43,12 @@ public class ContratoDTO {
     
     /**
      * Enum para categoria do contrato (mutuamente exclusivo)
-     * Inadimplente = 2+ parcelas em atraso
+     * Em Dia = sem parcelas em atraso (inclui contratos com cobranças pendentes/futuras)
      * Em Atraso = exatamente 1 parcela em atraso
+     * Inadimplente = 2+ parcelas em atraso
      */
     public enum CategoriaContrato {
         EM_DIA,
-        PENDENTE,
         EM_ATRASO,
         INADIMPLENTE
     }

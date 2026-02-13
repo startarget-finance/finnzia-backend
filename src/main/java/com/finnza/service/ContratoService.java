@@ -176,10 +176,11 @@ public class ContratoService {
         }
         
         // Se há filtros complexos, buscar TODOS os contratos (sem paginação) para filtrar corretamente
+        // Preservar o sort do pageable original
         Page<Contrato> todasPaginas = contratoRepository.buscarComFiltros(
             clienteId, 
             termoNormalizado, 
-            org.springframework.data.domain.PageRequest.of(0, Integer.MAX_VALUE)
+            org.springframework.data.domain.PageRequest.of(0, Integer.MAX_VALUE, pageable.getSort())
         );
         List<Contrato> todosContratos = todasPaginas.getContent();
         
@@ -310,6 +311,26 @@ public class ContratoService {
                     return true;
                 })
                 .collect(java.util.stream.Collectors.toList());
+        
+        // Aplicar ordenação manualmente (preservar sort do Pageable)
+        if (pageable.getSort().isSorted()) {
+            for (org.springframework.data.domain.Sort.Order order : pageable.getSort()) {
+                String prop = order.getProperty();
+                if ("dataVencimento".equals(prop)) {
+                    contratosFiltrados.sort((a, b) -> {
+                        LocalDate da = a.getDataVencimento() != null ? a.getDataVencimento() : LocalDate.MAX;
+                        LocalDate db = b.getDataVencimento() != null ? b.getDataVencimento() : LocalDate.MAX;
+                        return order.isAscending() ? da.compareTo(db) : db.compareTo(da);
+                    });
+                } else if ("valorContrato".equals(prop)) {
+                    contratosFiltrados.sort((a, b) -> {
+                        BigDecimal va = a.getValorContrato() != null ? a.getValorContrato() : BigDecimal.ZERO;
+                        BigDecimal vb = b.getValorContrato() != null ? b.getValorContrato() : BigDecimal.ZERO;
+                        return order.isAscending() ? va.compareTo(vb) : vb.compareTo(va);
+                    });
+                }
+            }
+        }
         
         // Aplicar paginação manualmente
         int start = (int) pageable.getOffset();

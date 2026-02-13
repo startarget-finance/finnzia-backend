@@ -40,6 +40,12 @@ public class ContratoDTO {
     private CategoriaContrato categoria;
     private LocalDateTime dataCriacao;
     private LocalDateTime dataAtualizacao;
+    private LocalDate dataVenda;
+    private LocalDate dataEncerramento;
+    private String linkContrato;
+    private Contrato.StatusAssinatura statusAssinatura;
+    private String projeto;
+    private BigDecimal valorEntrada;
     
     /**
      * Enum para categoria do contrato (mutuamente exclusivo)

@@ -65,6 +65,12 @@ public class ContratoService {
                 .inicioContrato(request.getInicioContrato())
                 .inicioRecorrencia(request.getInicioRecorrencia())
                 .whatsapp(request.getWhatsapp())
+                .dataVenda(request.getDataVenda())
+                .dataEncerramento(request.getDataEncerramento())
+                .linkContrato(request.getLinkContrato())
+                .statusAssinatura(request.getStatusAssinatura())
+                .projeto(request.getProjeto())
+                .valorEntrada(request.getValorEntrada())
                 .build();
 
         contrato = contratoRepository.save(contrato);
@@ -871,6 +877,12 @@ public class ContratoService {
                 .categoria(calcularCategoria(contrato))
                 .dataCriacao(contrato.getDataCriacao())
                 .dataAtualizacao(contrato.getDataAtualizacao())
+                .dataVenda(contrato.getDataVenda())
+                .dataEncerramento(contrato.getDataEncerramento())
+                .linkContrato(contrato.getLinkContrato())
+                .statusAssinatura(contrato.getStatusAssinatura())
+                .projeto(contrato.getProjeto())
+                .valorEntrada(contrato.getValorEntrada())
                 .build();
     }
     

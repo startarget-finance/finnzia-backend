@@ -53,6 +53,23 @@ public class CriarContratoRequest {
     @Pattern(regexp = "^\\+?[1-9]\\d{1,14}$", message = "WhatsApp inválido")
     private String whatsapp;
 
+    // Novos campos adicionais
+    private LocalDate dataVenda;
+
+    private LocalDate dataEncerramento;
+
+    @Size(max = 500, message = "Link contrato deve ter no máximo 500 caracteres")
+    private String linkContrato;
+
+    private Contrato.StatusAssinatura statusAssinatura;
+
+    @Size(max = 100, message = "Projeto deve ter no máximo 100 caracteres")
+    private String projeto;
+
+    @DecimalMin(value = "0.0", message = "Valor entrada não pode ser negativo")
+    @Digits(integer = 13, fraction = 2, message = "Valor entrada inválido")
+    private BigDecimal valorEntrada;
+
     // Configurações de pagamento do Asaas
     private String formaPagamento; // BOLETO, PIX, CREDIT_CARD, DEBIT_CARD
     

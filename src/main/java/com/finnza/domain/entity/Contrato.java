@@ -88,6 +88,26 @@ public class Contrato {
     @Column(name = "asaas_subscription_id", length = 50)
     private String asaasSubscriptionId;
 
+    // Dados adicionais do contrato
+    @Column(name = "data_venda")
+    private LocalDate dataVenda;
+
+    @Column(name = "data_encerramento")
+    private LocalDate dataEncerramento;
+
+    @Column(name = "link_contrato", length = 500)
+    private String linkContrato;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "status_assinatura", length = 20)
+    private StatusAssinatura statusAssinatura;
+
+    @Column(name = "projeto", length = 100)
+    private String projeto;
+
+    @Column(name = "valor_entrada", precision = 15, scale = 2)
+    private BigDecimal valorEntrada;
+
     @OneToMany(mappedBy = "contrato", cascade = CascadeType.ALL, orphanRemoval = true, fetch = FetchType.LAZY)
     @Builder.Default
     @org.hibernate.annotations.BatchSize(size = 20)
@@ -122,6 +142,18 @@ public class Contrato {
     public enum TipoPagamento {
         UNICO,
         RECORRENTE
+    }
+
+    /**
+     * Enum para status de assinatura do contrato
+     * PENDENTE: Aguardando assinatura digital
+     * ASSINADO: Contrato assinado digitalmente
+     * CANCELADO: Contrato cancelado
+     */
+    public enum StatusAssinatura {
+        PENDENTE,
+        ASSINADO,
+        CANCELADO
     }
 
     /**

@@ -2,6 +2,7 @@ package com.finnza.controller;
 
 import com.finnza.service.BomControleService;
 import com.finnza.service.BomControleRateLimiter;
+import com.finnza.service.UsuarioEmpresaService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.format.annotation.DateTimeFormat;
@@ -9,6 +10,8 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.bind.annotation.*;
 
 import java.time.LocalDate;
@@ -17,6 +20,9 @@ import java.util.Map;
 /**
  * Controller para integração com Bom Controle
  * Documentação: https://documenter.getpostman.com/view/1797561/SWT7BKWo
+ * 
+ * Suporta filtragem por empresa via header X-Empresa-Id:
+ * Quando presente, sobrescreve o parâmetro idsEmpresa e força uso dessa empresa
  */
 @Slf4j
 @RestController
@@ -29,6 +35,69 @@ public class BomControleController {
     
     @Autowired
     private BomControleRateLimiter rateLimiter;
+
+    @Autowired
+    private UsuarioEmpresaService usuarioEmpresaService;
+
+    /**
+     * Extrai o ID da empresa do header X-Empresa-Id
+     * Este header é adicionado automaticamente pelo CompanyInterceptor
+     * 
+     * @param headerEmpresaId valor do header X-Empresa-Id
+     * @return Integer com o ID da empresa, ou null se não informado
+     */
+    private Integer extrairEmpresaDoHeader(String headerEmpresaId) {
+        if (headerEmpresaId != null && !headerEmpresaId.isBlank()) {
+            try {
+                Integer empresaId = Integer.parseInt(headerEmpresaId.trim());
+                if (empresaId > 0) {
+                    log.debug("📤 Usando X-Empresa-Id do header: {}", empresaId);
+                    return empresaId;
+                }
+            } catch (NumberFormatException e) {
+                log.warn("⚠️ X-Empresa-Id inválido: {}", headerEmpresaId);
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Valida se o usuário autenticado tem permissão de acessar a empresa solicitada
+     * Se o usuário é ADMIN, tem acesso a todas as empresas
+     * Se for cliente, valida se a empresa está na lista de empresas permitidas
+     * 
+     * @param empresaId ID da empresa a validar
+     * @return true se tem acesso, false caso contrário
+     */
+    private boolean validarAcessoEmpresa(Integer empresaId) {
+        if (empresaId == null || empresaId <= 0) {
+            return false;
+        }
+
+        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+        if (auth == null || !auth.isAuthenticated()) {
+            log.warn("⚠️ Usuário não autenticado ao validar acesso à empresa {}", empresaId);
+            return false;
+        }
+
+        String email = auth.getName();
+        
+        try {
+            // Verifica se o usuário tem acesso a esta empresa
+            boolean temAcesso = usuarioEmpresaService.validarAcessoUsuarioEmpresa(email, empresaId);
+            
+            if (temAcesso) {
+                log.info("✅ Usuário {} tem acesso à empresa {}", email, empresaId);
+            } else {
+                log.warn("🔒 ACESSO NEGADO: Usuário {} tentou acessar empresa {} sem permissão", email, empresaId);
+            }
+            
+            return temAcesso;
+        } catch (Exception e) {
+            log.error("❌ Erro ao validar acesso à empresa {} para usuário {}:", empresaId, email, e);
+            return false;
+        }
+    }
 
     /**
      * Testa a conexão com a API do Bom Controle
@@ -45,7 +114,7 @@ public class BomControleController {
      * Lista empresas do Bom Controle
      */
     @GetMapping("/empresas")
-    @PreAuthorize("hasPermission(null, 'FINANCEIRO')")
+    @PreAuthorize("hasPermission(null, 'MOVIMENTACOES')")
     public ResponseEntity<Map<String, Object>> listarEmpresas(
             @RequestParam(required = false) String pesquisa) {
         log.info("Listando empresas do Bom Controle: pesquisa={}", pesquisa);
@@ -64,10 +133,12 @@ public class BomControleController {
 
     /**
      * Lista contas a pagar (movimentações com Debito=true)
+     * Suporta header X-Empresa-Id para filtragem automática por empresa
      */
     @GetMapping("/contas-a-pagar")
-    @PreAuthorize("hasPermission(null, 'FINANCEIRO')")
+    @PreAuthorize("hasPermission(null, 'MOVIMENTACOES')")
     public ResponseEntity<Map<String, Object>> listarContasPagar(
+            @RequestHeader(value = "X-Empresa-Id", required = false) String headerEmpresaId,
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate dataInicio,
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate dataTermino,
             @RequestParam(required = false) String tipoData,
@@ -79,8 +150,38 @@ public class BomControleController {
             @RequestParam(required = false, defaultValue = "50") Integer itensPorPagina,
             @RequestParam(required = false, defaultValue = "1") Integer numeroDaPagina) {
         
-        log.info("Listando contas a pagar do Bom Controle: dataInicio={}, dataTermino={}, pagina={}",
-                dataInicio, dataTermino, numeroDaPagina);
+        // Se header X-Empresa-Id for enviado, sobrescreve o parâmetro idsEmpresa
+        Integer empresaFinal = extrairEmpresaDoHeader(headerEmpresaId);
+        if (empresaFinal != null) {
+            idsEmpresa = empresaFinal;
+        } else {
+            // Se não foi fornecido header X-Empresa-Id, verificar se é obrigatório
+            Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+            if (auth != null && auth.isAuthenticated()) {
+                String email = auth.getName();
+                if (!usuarioEmpresaService.isAdmin(email)) {
+                    log.warn("⚠️ Usuário {} fez requisição sem X-Empresa-Id - requerido para usuários com acesso limitado", email);
+                    return ResponseEntity.status(400).body(Map.of(
+                            "erro", true,
+                            "mensagem", "X-Empresa-Id header é obrigatório para esta requisição"
+                    ));
+                }
+            }
+        }
+        
+        // Validar acesso à empresa do usuário
+        if (empresaFinal != null) {
+            if (!validarAcessoEmpresa(empresaFinal)) {
+                log.warn("🔒 ACESSO NEGADO: Usuário tentou listar contas a pagar da empresa {} sem permissão", empresaFinal);
+                return ResponseEntity.status(403).body(Map.of(
+                    "erro", true,
+                    "mensagem", "Você não tem permissão de acessar esta empresa"
+                ));
+            }
+        }
+        
+        log.info("Listando contas a pagar do Bom Controle: dataInicio={}, dataTermino={}, empresa={}, pagina={}",
+                dataInicio, dataTermino, idsEmpresa, numeroDaPagina);
         
         try {
             String dataInicioStr = dataInicio != null ? dataInicio.toString() : null;
@@ -102,10 +203,12 @@ public class BomControleController {
 
     /**
      * Lista contas a receber (movimentações com Debito=false)
+     * Suporta header X-Empresa-Id para filtragem automática por empresa
      */
     @GetMapping("/contas-a-receber")
-    @PreAuthorize("hasPermission(null, 'FINANCEIRO')")
+    @PreAuthorize("hasPermission(null, 'MOVIMENTACOES')")
     public ResponseEntity<Map<String, Object>> listarContasReceber(
+            @RequestHeader(value = "X-Empresa-Id", required = false) String headerEmpresaId,
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate dataInicio,
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate dataTermino,
             @RequestParam(required = false) String tipoData,
@@ -117,8 +220,38 @@ public class BomControleController {
             @RequestParam(required = false, defaultValue = "50") Integer itensPorPagina,
             @RequestParam(required = false, defaultValue = "1") Integer numeroDaPagina) {
         
-        log.info("Listando contas a receber do Bom Controle: dataInicio={}, dataTermino={}, pagina={}",
-                dataInicio, dataTermino, numeroDaPagina);
+        // Se header X-Empresa-Id for enviado, sobrescreve o parâmetro idsEmpresa
+        Integer empresaFinal = extrairEmpresaDoHeader(headerEmpresaId);
+        if (empresaFinal != null) {
+            idsEmpresa = empresaFinal;
+        } else {
+            // Se não foi fornecido header X-Empresa-Id, verificar se é obrigatório
+            Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+            if (auth != null && auth.isAuthenticated()) {
+                String email = auth.getName();
+                if (!usuarioEmpresaService.isAdmin(email)) {
+                    log.warn("⚠️ Usuário {} fez requisição sem X-Empresa-Id - requerido para usuários com acesso limitado", email);
+                    return ResponseEntity.status(400).body(Map.of(
+                            "erro", true,
+                            "mensagem", "X-Empresa-Id header é obrigatório para esta requisição"
+                    ));
+                }
+            }
+        }
+        
+        // Validar acesso à empresa do usuário
+        if (empresaFinal != null) {
+            if (!validarAcessoEmpresa(empresaFinal)) {
+                log.warn("🔒 ACESSO NEGADO: Usuário tentou listar contas a receber da empresa {} sem permissão", empresaFinal);
+                return ResponseEntity.status(403).body(Map.of(
+                    "erro", true,
+                    "mensagem", "Você não tem permissão de acessar esta empresa"
+                ));
+            }
+        }
+        
+        log.info("Listando contas a receber do Bom Controle: dataInicio={}, dataTermino={}, empresa={}, pagina={}",
+                dataInicio, dataTermino, idsEmpresa, numeroDaPagina);
         
         try {
             String dataInicioStr = dataInicio != null ? dataInicio.toString() : null;
@@ -140,10 +273,13 @@ public class BomControleController {
 
     /**
      * Busca movimentações financeiras com filtros e paginação
+     * 
+     * Suporta header X-Empresa-Id para filtragem automática por empresa
      */
     @GetMapping("/movimentacoes")
-    @PreAuthorize("hasPermission(null, 'FINANCEIRO')")
+    @PreAuthorize("hasPermission(null, 'MOVIMENTACOES')")
     public ResponseEntity<Map<String, Object>> buscarMovimentacoes(
+            @RequestHeader(value = "X-Empresa-Id", required = false) String headerEmpresaId,
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate dataInicio,
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate dataTermino,
             @RequestParam(required = false) String tipoData,
@@ -156,8 +292,39 @@ public class BomControleController {
             @RequestParam(required = false, defaultValue = "50") Integer itensPorPagina,
             @RequestParam(required = false, defaultValue = "1") Integer numeroDaPagina) {
         
-        log.info("Buscando movimentações do Bom Controle: dataInicio={}, dataTermino={}, tipo={}, pagina={}",
-                dataInicio, dataTermino, tipo, numeroDaPagina);
+        // Se header X-Empresa-Id for enviado, sobrescreve o parâmetro idsEmpresa
+        Integer empresaFinal = extrairEmpresaDoHeader(headerEmpresaId);
+        if (empresaFinal != null) {
+            log.info("Buscando movimentações com X-Empresa-Id do header: {}", empresaFinal);
+            
+            // VALIDAÇÃO DE SEGURANÇA: Verifica se o usuário tem permissão para acessar esta empresa
+            if (!validarAcessoEmpresa(empresaFinal)) {
+                log.error("🔒 ACESSO NEGADO: Usuário tentou acessar empresa {} sem permissão", empresaFinal);
+                return ResponseEntity.status(403).body(Map.of(
+                        "erro", true,
+                        "mensagem", "Você não tem permissão de acessar esta empresa"
+                ));
+            }
+            
+            idsEmpresa = empresaFinal;
+        } else {
+            // Se não foi fornecido header X-Empresa-Id, verificar se é obrigatório
+            Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+            if (auth != null && auth.isAuthenticated()) {
+                String email = auth.getName();
+                // Se usuário não é Admin, DEVE fornecer X-Empresa-Id
+                if (!usuarioEmpresaService.isAdmin(email)) {
+                    log.warn("⚠️ Usuário {} fez requisição sem X-Empresa-Id - requerido para usuários com acesso limitado", email);
+                    return ResponseEntity.status(400).body(Map.of(
+                            "erro", true,
+                            "mensagem", "X-Empresa-Id header é obrigatório para esta requisição"
+                    ));
+                }
+            }
+        }
+        
+        log.info("Buscando movimentações do Bom Controle: dataInicio={}, dataTermino={}, empresa={}, pagina={}",
+                dataInicio, dataTermino, idsEmpresa, numeroDaPagina);
         
         try {
             // Se não houver datas, usar mês atual como padrão
@@ -201,8 +368,9 @@ public class BomControleController {
      * Pesquisa movimentações com filtros avançados
      */
     @GetMapping("/movimentacoes/pesquisar")
-    @PreAuthorize("hasPermission(null, 'FINANCEIRO')")
+    @PreAuthorize("hasPermission(null, 'MOVIMENTACOES')")
     public ResponseEntity<Map<String, Object>> pesquisarMovimentacoes(
+            @RequestHeader(value = "X-Empresa-Id", required = false) String headerEmpresaId,
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate dataInicio,
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate dataTermino,
             @RequestParam(required = false) String tipoData,
@@ -216,7 +384,7 @@ public class BomControleController {
             @RequestParam(required = false, defaultValue = "1") Integer numeroDaPagina) {
         
         // Mesma lógica do buscarMovimentacoes, mas pode ter comportamento diferente no futuro
-        return buscarMovimentacoes(dataInicio, dataTermino, tipoData, idsEmpresa, idsCliente, idsFornecedor,
+        return buscarMovimentacoes(headerEmpresaId, dataInicio, dataTermino, tipoData, idsEmpresa, idsCliente, idsFornecedor,
                 textoPesquisa, categoria, tipo, itensPorPagina, numeroDaPagina);
     }
 
@@ -224,7 +392,7 @@ public class BomControleController {
      * Gera DFC (Demonstrativo de Fluxo de Caixa)
      */
     @GetMapping("/dfc")
-    @PreAuthorize("hasPermission(null, 'FINANCEIRO')")
+    @PreAuthorize("hasPermission(null, 'MOVIMENTACOES')")
     public ResponseEntity<Map<String, Object>> gerarDFC(
             @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate dataInicio,
             @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate dataTermino,
@@ -261,6 +429,17 @@ public class BomControleController {
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate dataTermino,
             @RequestParam(required = false, defaultValue = "6") Integer idEmpresa) {
         
+        // Validar acesso à empresa do usuário
+        if (idEmpresa != null) {
+            if (!validarAcessoEmpresa(idEmpresa)) {
+                log.warn("🔒 ACESSO NEGADO: Usuário tentou sincronizar período da empresa {} sem permissão", idEmpresa);
+                return ResponseEntity.status(403).body(Map.of(
+                    "erro", true,
+                    "mensagem", "Você não tem permissão de acessar esta empresa"
+                ));
+            }
+        }
+        
         log.info("Sincronizando período do Bom Controle: dataInicio={}, dataTermino={}, idEmpresa={}",
                 dataInicio, dataTermino, idEmpresa);
         
@@ -288,6 +467,17 @@ public class BomControleController {
     @PreAuthorize("hasPermission(null, 'CONFIGURACOES')")
     public ResponseEntity<Map<String, Object>> sincronizarIncremental(
             @RequestParam(required = false, defaultValue = "6") Integer idEmpresa) {
+        
+        // Validar acesso à empresa do usuário
+        if (idEmpresa != null) {
+            if (!validarAcessoEmpresa(idEmpresa)) {
+                log.warn("🔒 ACESSO NEGADO: Usuário tentou sincronizar incrementalmente a empresa {} sem permissão", idEmpresa);
+                return ResponseEntity.status(403).body(Map.of(
+                    "erro", true,
+                    "mensagem", "Você não tem permissão de acessar esta empresa"
+                ));
+            }
+        }
         
         log.info("Sincronização incremental do Bom Controle: idEmpresa={}", idEmpresa);
         
@@ -332,7 +522,7 @@ public class BomControleController {
      * Status do cache - informações sobre movimentações armazenadas
      */
     @GetMapping("/cache/status")
-    @PreAuthorize("hasPermission(null, 'FINANCEIRO')")
+    @PreAuthorize("hasPermission(null, 'MOVIMENTACOES')")
     public ResponseEntity<Map<String, Object>> statusCache() {
         log.info("Consultando status do cache do Bom Controle...");
         
@@ -348,55 +538,7 @@ public class BomControleController {
         }
     }
 
-    /**
-     * Exporta movimentações para Excel
-     */
-    @GetMapping("/movimentacoes/exportar/excel")
-    @PreAuthorize("hasPermission(null, 'FINANCEIRO')")
-    public ResponseEntity<byte[]> exportarExcel(
-            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate dataInicio,
-            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate dataTermino,
-            @RequestParam(required = false) String tipoData,
-            @RequestParam(required = false) Integer idsEmpresa,
-            @RequestParam(required = false) Integer idsCliente,
-            @RequestParam(required = false) Integer idsFornecedor,
-            @RequestParam(required = false) String textoPesquisa) {
-        
-        log.info("Exportando movimentações para Excel do Bom Controle");
-        
-        try {
-            // Por enquanto, retorna erro 501 (Not Implemented)
-            // Implementar geração de Excel no futuro se necessário
-            return ResponseEntity.status(501).build();
-        } catch (Exception e) {
-            log.error("Erro ao exportar Excel", e);
-            return ResponseEntity.status(500).build();
-        }
-    }
-
-    /**
-     * Exporta movimentações para PDF
-     */
-    @GetMapping("/movimentacoes/exportar/pdf")
-    @PreAuthorize("hasPermission(null, 'FINANCEIRO')")
-    public ResponseEntity<byte[]> exportarPDF(
-            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate dataInicio,
-            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate dataTermino,
-            @RequestParam(required = false) String tipoData,
-            @RequestParam(required = false) Integer idsEmpresa,
-            @RequestParam(required = false) Integer idsCliente,
-            @RequestParam(required = false) Integer idsFornecedor,
-            @RequestParam(required = false) String textoPesquisa) {
-        
-        log.info("Exportando movimentações para PDF do Bom Controle");
-        
-        try {
-            // Por enquanto, retorna erro 501 (Not Implemented)
-            // Implementar geração de PDF no futuro se necessário
-            return ResponseEntity.status(501).build();
-        } catch (Exception e) {
-            log.error("Erro ao exportar PDF", e);
-            return ResponseEntity.status(500).build();
-        }
-    }
+    // Endpoints de exportação (exportarExcel e exportarPDF) removidos
+    // Implementar futuramente usando bibliotecas como Apache POI (Excel) ou iText (PDF)
+    // se a funcionalidade for necessária
 }

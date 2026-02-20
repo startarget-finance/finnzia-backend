@@ -67,6 +67,7 @@ public class BomControleService {
      * Obtém ou busca o ID da empresa do Bom Controle para o usuário atual
      * Usa cache por requisição (ThreadLocal) e cache por usuário para evitar rate limit
      * SEM compartilhar entre diferentes usuários
+     * IMPORTANTE: Chamar limparCacheRequisicao() no finally após usar este método
      */
     private Integer obterOuBuscarEmpresaId() {
         // 1. Verificar se já foi buscado nesta requisição (ThreadLocal)
@@ -183,10 +184,16 @@ public class BomControleService {
     
     /**
      * Limpa o cache do ThreadLocal após a requisição
-     * Deve ser chamado no final do método ou usar @RequestScope
+     * Deve ser chamado no finally após chamar obterOuBuscarEmpresaId()
+     * Essencial para evitar vazamento de memória e compartilhamento de dados entre requisições
      */
     private void limparCacheRequisicao() {
-        empresaIdPorRequisicao.remove();
+        try {
+            empresaIdPorRequisicao.remove();
+            log.debug("✅ ThreadLocal de empresa limpado para esta requisição");
+        } catch (Exception e) {
+            log.warn("⚠️ Erro ao limpar ThreadLocal: {}", e.getMessage());
+        }
     }
 
     public BomControleService(
@@ -336,6 +343,48 @@ public class BomControleService {
         } catch (Exception e) {
             log.error("Erro ao listar empresas do Bom Controle", e);
             throw new RuntimeException("Erro ao listar empresas: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Obtém lista de todas as empresas disponíveis no Bom Controle
+     * Cache: 10 minutos
+     * 
+     * @return Lista de maps com dados das empresas (Id, Nome, etc)
+     */
+    public List<Map<String, Object>> obterTodasAsEmpresas() {
+        try {
+            Map<String, Object> resultado = listarEmpresas(null);
+            @SuppressWarnings("unchecked")
+            List<Map<String, Object>> empresas = (List<Map<String, Object>>) resultado.get("empresas");
+            return empresas != null ? empresas : Collections.emptyList();
+        } catch (Exception e) {
+            log.error("Erro ao obter todas as empresas: {}", e.getMessage());
+            return Collections.emptyList();
+        }
+    }
+
+    /**
+     * Obtém o nome de uma empresa específica pelo ID (BOMControle)
+     * 
+     * @param idEmpresa ID da empresa
+     * @return Optional contendo o nome da empresa ou vazio se não encontrada
+     */
+    public Optional<String> obterNomeEmpresa(Integer idEmpresa) {
+        if (idEmpresa == null || idEmpresa <= 0) {
+            return Optional.empty();
+        }
+        
+        try {
+            List<Map<String, Object>> empresas = obterTodasAsEmpresas();
+            return empresas.stream()
+                    .filter(emp -> idEmpresa.equals(((Number) emp.get("Id")).intValue()))
+                    .map(emp -> (String) emp.get("Nome"))
+                    .filter(nome -> nome != null && !nome.isEmpty())
+                    .findFirst();
+        } catch (Exception e) {
+            log.error("Erro ao obter nome da empresa {}: {}", idEmpresa, e.getMessage());
+            return Optional.empty();
         }
     }
 
@@ -1049,6 +1098,9 @@ public class BomControleService {
         } catch (Exception e) {
             log.error("Erro ao buscar movimentações do Bom Controle", e);
             throw new RuntimeException("Erro ao buscar movimentações: " + e.getMessage(), e);
+        } finally {
+            // Limpar cache por requisição do ThreadLocal
+            limparCacheRequisicao();
         }
     }
     

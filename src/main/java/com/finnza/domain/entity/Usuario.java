@@ -98,6 +98,14 @@ public class Usuario {
     private Set<Permissao> permissoes = new HashSet<>();
 
     /**
+     * Relação many-to-one: um usuário tem acesso a múltiplas empresas do BOMControle
+     */
+    @OneToMany(mappedBy = "usuario", cascade = CascadeType.ALL, orphanRemoval = true, fetch = FetchType.LAZY)
+    @Builder.Default
+    @org.hibernate.annotations.BatchSize(size = 30)
+    private Set<EmpresaUsuario> empresas = new HashSet<>();
+
+    /**
      * Enum para roles do usuário
      */
     public enum Role {
@@ -127,6 +135,55 @@ public class Usuario {
     public void removerPermissao(Permissao permissao) {
         this.permissoes.remove(permissao);
         permissao.setUsuario(null);
+    }
+
+    /**
+     * Adiciona acesso a uma empresa
+     */
+    public void adicionarEmpresa(EmpresaUsuario empresa) {
+        if (empresa != null) {
+            this.empresas.add(empresa);
+            empresa.setUsuario(this);
+        }
+    }
+
+    /**
+     * Remove acesso a uma empresa
+     */
+    public void removerEmpresa(EmpresaUsuario empresa) {
+        if (empresa != null) {
+            this.empresas.remove(empresa);
+            empresa.setUsuario(null);
+        }
+    }
+
+    /**
+     * Verifica se o usuário tem acesso a uma empresa específica
+     */
+    public boolean temAcesso(Integer idEmpresa) {
+        if (idEmpresa == null || idEmpresa <= 0) {
+            return false;
+        }
+        return this.empresas.stream()
+                .anyMatch(eu -> eu.getIdEmpresa().equals(idEmpresa) && eu.getAtivo());
+    }
+
+    /**
+     * Obtém a empresa padrão do usuário
+     */
+    public EmpresaUsuario obterEmpresaPadrao() {
+        return this.empresas.stream()
+                .filter(eu -> eu.getPadrao() && eu.getAtivo())
+                .findFirst()
+                .orElse(null);
+    }
+
+    /**
+     * Verifica se o usuário tem ao menos uma empresa ativa
+     */
+    public boolean temEmpresasAtivas() {
+        return this.empresas.stream()
+                .anyMatch(EmpresaUsuario::getAtivo);
     }
 
     /**

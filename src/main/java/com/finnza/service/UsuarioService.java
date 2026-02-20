@@ -2,6 +2,7 @@ package com.finnza.service;
 
 import com.finnza.domain.entity.Permissao;
 import com.finnza.domain.entity.Usuario;
+import com.finnza.dto.EmpresaUsuarioDTO;
 import com.finnza.dto.request.AlterarSenhaRequest;
 import com.finnza.dto.request.AtualizarPermissoesRequest;
 import com.finnza.dto.request.AtualizarPerfilRequest;
@@ -9,6 +10,7 @@ import com.finnza.dto.request.AtualizarUsuarioRequest;
 import com.finnza.dto.request.CriarUsuarioRequest;
 import com.finnza.dto.request.UsuarioFiltroRequest;
 import com.finnza.dto.response.UsuarioDTO;
+import com.finnza.service.UsuarioEmpresaService;
 import com.finnza.repository.PermissaoRepository;
 import com.finnza.repository.UsuarioRepository;
 import com.finnza.repository.specification.UsuarioSpecification;
@@ -24,6 +26,7 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -41,6 +44,9 @@ public class UsuarioService {
 
     @Autowired
     private PasswordEncoder passwordEncoder;
+
+    @Autowired
+    private UsuarioEmpresaService usuarioEmpresaService;
 
     /**
      * Cria um novo usuário
@@ -346,6 +352,16 @@ public class UsuarioService {
         // Atualizar senha
         usuario.setSenha(passwordEncoder.encode(request.getNovaSenha()));
         usuarioRepository.save(usuario);
+    }
+
+    /**
+     * Obtém as empresas do usuário logado
+     */
+    public List<EmpresaUsuarioDTO> obterMinhasEmpresas() {
+        String email = getEmailUsuarioLogado();
+        Usuario usuario = usuarioRepository.findByEmail(email)
+                .orElseThrow(() -> new RuntimeException("Usuário não encontrado"));
+        return usuarioEmpresaService.obterEmpresasDoUsuario(usuario.getId());
     }
 
     /**

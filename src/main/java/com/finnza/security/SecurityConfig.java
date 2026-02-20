@@ -115,6 +115,7 @@ public class SecurityConfig {
             "X-Requested-With",
             "Accept",
             "Origin",
+            "X-Empresa-Id",
             "Access-Control-Request-Method",
             "Access-Control-Request-Headers"
         ));
@@ -123,6 +124,7 @@ public class SecurityConfig {
         configuration.setExposedHeaders(Arrays.asList(
             "Authorization",
             "Content-Type",
+            "X-Empresa-Id",
             "Access-Control-Allow-Origin",
             "Access-Control-Allow-Credentials"
         ));

@@ -1,5 +1,8 @@
 package com.finnza.controller;
 
+import com.finnza.dto.response.DfcResponseDTO;
+import com.finnza.dto.response.ResumoFinanceiroDTO;
+import com.finnza.dto.response.ResumoFinanceiroPeriodosDTO;
 import com.finnza.service.BomControleService;
 import com.finnza.service.BomControleRateLimiter;
 import com.finnza.service.UsuarioEmpresaService;
@@ -289,6 +292,7 @@ public class BomControleController {
             @RequestParam(required = false) String textoPesquisa,
             @RequestParam(required = false) String categoria,
             @RequestParam(required = false) String tipo,
+            @RequestParam(required = false) String statusPagamento,
             @RequestParam(required = false, defaultValue = "50") Integer itensPorPagina,
             @RequestParam(required = false, defaultValue = "1") Integer numeroDaPagina) {
         
@@ -346,7 +350,7 @@ public class BomControleController {
             
             Map<String, Object> resultado = bomControleService.buscarMovimentacoes(
                     dataInicioStr, dataTerminoStr, tipoData, idsEmpresa, idsCliente, idsFornecedor,
-                    textoPesquisa, categoria, tipo, itensPorPagina, numeroDaPagina);
+                    textoPesquisa, categoria, tipo, statusPagamento, itensPorPagina, numeroDaPagina);
             
             return ResponseEntity.ok(resultado);
         } catch (IllegalArgumentException e) {
@@ -360,6 +364,140 @@ public class BomControleController {
             return ResponseEntity.status(500).body(Map.of(
                     "erro", true,
                     "mensagem", "Erro ao buscar movimentações: " + e.getMessage()
+            ));
+        }
+    }
+
+    @GetMapping("/resumo-financeiro")
+    @PreAuthorize("hasPermission(null, 'MOVIMENTACOES')")
+    public ResponseEntity<?> obterResumoFinanceiro(
+            @RequestHeader(value = "X-Empresa-Id", required = false) String headerEmpresaId,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate dataInicio,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate dataTermino,
+            @RequestParam(required = false) String tipoData,
+            @RequestParam(required = false) Integer idsEmpresa,
+            @RequestParam(required = false) Integer idsCliente,
+            @RequestParam(required = false) Integer idsFornecedor,
+            @RequestParam(required = false) String textoPesquisa,
+            @RequestParam(required = false) String categoria,
+            @RequestParam(required = false) String tipo) {
+
+        Integer empresaFinal = extrairEmpresaDoHeader(headerEmpresaId);
+        if (empresaFinal != null) {
+            if (!validarAcessoEmpresa(empresaFinal)) {
+                log.error("🔒 ACESSO NEGADO: Usuário tentou gerar resumo para empresa {} sem permissão", empresaFinal);
+                return ResponseEntity.status(403).body(Map.of(
+                        "erro", true,
+                        "mensagem", "Você não tem permissão de acessar esta empresa"
+                ));
+            }
+            idsEmpresa = empresaFinal;
+        } else {
+            Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+            if (auth != null && auth.isAuthenticated()) {
+                String email = auth.getName();
+                if (!usuarioEmpresaService.isAdmin(email)) {
+                    log.warn("⚠️ Usuário {} solicitou resumo sem X-Empresa-Id - requerido para não administradores", email);
+                    return ResponseEntity.status(400).body(Map.of(
+                            "erro", true,
+                            "mensagem", "X-Empresa-Id header é obrigatório para esta requisição"
+                    ));
+                }
+            }
+        }
+
+        LocalDate dataInicioFinal = dataInicio;
+        LocalDate dataTerminoFinal = dataTermino;
+        if (dataInicioFinal == null || dataTerminoFinal == null) {
+            LocalDate hoje = LocalDate.now();
+            if (dataInicioFinal == null) {
+                dataInicioFinal = hoje.withDayOfMonth(1);
+            }
+            if (dataTerminoFinal == null) {
+                dataTerminoFinal = hoje.withDayOfMonth(hoje.lengthOfMonth());
+            }
+        }
+
+        try {
+            ResumoFinanceiroDTO resumo = bomControleService.gerarResumoFinanceiro(
+                    dataInicioFinal.toString(),
+                    dataTerminoFinal.toString(),
+                    tipoData,
+                    idsEmpresa,
+                    idsCliente,
+                    idsFornecedor,
+                    textoPesquisa,
+                    categoria,
+                    tipo
+            );
+            return ResponseEntity.ok(resumo);
+        } catch (IllegalArgumentException e) {
+            log.warn("Parâmetros inválidos ao gerar resumo financeiro: {}", e.getMessage());
+            return ResponseEntity.badRequest().body(Map.of(
+                    "erro", true,
+                    "mensagem", e.getMessage()
+            ));
+        } catch (Exception e) {
+            log.error("Erro ao gerar resumo financeiro", e);
+            return ResponseEntity.status(500).body(Map.of(
+                    "erro", true,
+                    "mensagem", "Erro ao gerar resumo financeiro: " + e.getMessage()
+            ));
+        }
+    }
+
+    @GetMapping("/resumo-financeiro/padroes")
+    @PreAuthorize("hasPermission(null, 'MOVIMENTACOES')")
+    public ResponseEntity<?> obterResumoFinanceiroPadroes(
+            @RequestHeader(value = "X-Empresa-Id", required = false) String headerEmpresaId,
+            @RequestParam(required = false) String tipoData,
+            @RequestParam(required = false) Integer idsEmpresa,
+            @RequestParam(required = false) Integer idsCliente,
+            @RequestParam(required = false) Integer idsFornecedor,
+            @RequestParam(required = false) String textoPesquisa,
+            @RequestParam(required = false) String categoria,
+            @RequestParam(required = false) String tipo) {
+
+        Integer empresaFinal = extrairEmpresaDoHeader(headerEmpresaId);
+        if (empresaFinal != null) {
+            if (!validarAcessoEmpresa(empresaFinal)) {
+                log.error("🔒 ACESSO NEGADO: Usuário tentou gerar resumo padrão para empresa {} sem permissão", empresaFinal);
+                return ResponseEntity.status(403).body(Map.of(
+                        "erro", true,
+                        "mensagem", "Você não tem permissão de acessar esta empresa"
+                ));
+            }
+            idsEmpresa = empresaFinal;
+        } else {
+            Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+            if (auth != null && auth.isAuthenticated()) {
+                String email = auth.getName();
+                if (!usuarioEmpresaService.isAdmin(email)) {
+                    log.warn("⚠️ Usuário {} solicitou resumo padrão sem X-Empresa-Id - requerido para não administradores", email);
+                    return ResponseEntity.status(400).body(Map.of(
+                            "erro", true,
+                            "mensagem", "X-Empresa-Id header é obrigatório para esta requisição"
+                    ));
+                }
+            }
+        }
+
+        try {
+            ResumoFinanceiroPeriodosDTO resposta = bomControleService.gerarResumoFinanceiroPeriodosPadrao(
+                    tipoData,
+                    idsEmpresa,
+                    idsCliente,
+                    idsFornecedor,
+                    textoPesquisa,
+                    categoria,
+                    tipo
+            );
+            return ResponseEntity.ok(resposta);
+        } catch (Exception e) {
+            log.error("Erro ao gerar resumo financeiro padrão", e);
+            return ResponseEntity.status(500).body(Map.of(
+                    "erro", true,
+                    "mensagem", "Erro ao gerar resumo padrão: " + e.getMessage()
             ));
         }
     }
@@ -380,12 +518,13 @@ public class BomControleController {
             @RequestParam(required = false) String textoPesquisa,
             @RequestParam(required = false) String categoria,
             @RequestParam(required = false) String tipo,
+            @RequestParam(required = false) String statusPagamento,
             @RequestParam(required = false, defaultValue = "50") Integer itensPorPagina,
             @RequestParam(required = false, defaultValue = "1") Integer numeroDaPagina) {
         
         // Mesma lógica do buscarMovimentacoes, mas pode ter comportamento diferente no futuro
         return buscarMovimentacoes(headerEmpresaId, dataInicio, dataTermino, tipoData, idsEmpresa, idsCliente, idsFornecedor,
-                textoPesquisa, categoria, tipo, itensPorPagina, numeroDaPagina);
+                textoPesquisa, categoria, tipo, statusPagamento, itensPorPagina, numeroDaPagina);
     }
 
     /**
@@ -393,23 +532,55 @@ public class BomControleController {
      */
     @GetMapping("/dfc")
     @PreAuthorize("hasPermission(null, 'MOVIMENTACOES')")
-    public ResponseEntity<Map<String, Object>> gerarDFC(
+    public ResponseEntity<?> gerarDFC(
+            @RequestHeader(value = "X-Empresa-Id", required = false) String headerEmpresaId,
             @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate dataInicio,
             @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate dataTermino,
             @RequestParam(required = false, defaultValue = "true") Boolean usarCache,
-            @RequestParam(required = false, defaultValue = "false") Boolean forcarAtualizacao) {
-        
-        log.info("Gerando DFC do Bom Controle: dataInicio={}, dataTermino={}, usarCache={}, forcarAtualizacao={}",
-                dataInicio, dataTermino, usarCache, forcarAtualizacao);
-        
+            @RequestParam(required = false, defaultValue = "false") Boolean forcarAtualizacao,
+            @RequestParam(required = false) Integer idsEmpresa) {
+
+        Integer empresaFinal = extrairEmpresaDoHeader(headerEmpresaId);
+        if (empresaFinal != null) {
+            if (!validarAcessoEmpresa(empresaFinal)) {
+                log.warn("🔒 ACESSO NEGADO: Usuário tentou gerar DFC da empresa {} sem permissão", empresaFinal);
+                return ResponseEntity.status(403).body(Map.of(
+                        "erro", true,
+                        "mensagem", "Você não tem permissão de acessar esta empresa"
+                ));
+            }
+            idsEmpresa = empresaFinal;
+        } else {
+            Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+            if (auth != null && auth.isAuthenticated()) {
+                String email = auth.getName();
+                if (!usuarioEmpresaService.isAdmin(email)) {
+                    log.warn("⚠️ Usuário {} solicitou DFC sem X-Empresa-Id - requerido para não administradores", email);
+                    return ResponseEntity.status(400).body(Map.of(
+                            "erro", true,
+                            "mensagem", "X-Empresa-Id header é obrigatório para esta requisição"
+                    ));
+                }
+            }
+        }
+
+        log.info("Gerando DFC do Bom Controle: dataInicio={}, dataTermino={}, empresa={}, usarCache={}, forcarAtualizacao={}",
+                dataInicio, dataTermino, idsEmpresa, usarCache, forcarAtualizacao);
+
         try {
-            String dataInicioStr = dataInicio.toString();
-            String dataTerminoStr = dataTermino.toString();
-            
-            Map<String, Object> resultado = bomControleService.gerarDFC(
-                    dataInicioStr, dataTerminoStr, usarCache, forcarAtualizacao);
-            
+            DfcResponseDTO resultado = bomControleService.gerarDFC(
+                    dataInicio.toString(),
+                    dataTermino.toString(),
+                    usarCache,
+                    forcarAtualizacao,
+                    idsEmpresa);
             return ResponseEntity.ok(resultado);
+        } catch (IllegalArgumentException e) {
+            log.warn("Parâmetros inválidos ao gerar DFC: {}", e.getMessage());
+            return ResponseEntity.badRequest().body(Map.of(
+                    "erro", true,
+                    "mensagem", e.getMessage()
+            ));
         } catch (Exception e) {
             log.error("Erro ao gerar DFC", e);
             return ResponseEntity.status(500).body(Map.of(

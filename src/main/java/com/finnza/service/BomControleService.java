@@ -1,19 +1,26 @@
 package com.finnza.service;
 
+import com.finnza.dto.response.DfcResponseDTO;
+import com.finnza.dto.response.ResumoFinanceiroDTO;
+import com.finnza.dto.response.ResumoFinanceiroPeriodosDTO;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
-import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.web.reactive.function.client.ExchangeStrategies;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.reactive.function.client.WebClientResponseException;
 
+import java.text.Normalizer;
+import java.time.Instant;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.YearMonth;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
-import java.util.Collections;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
@@ -391,7 +398,7 @@ public class BomControleService {
     /**
      * Busca TODAS as páginas de movimentações para um tipo de data específico
      */
-    private List<Map<String, Object>> buscarTodasPaginasMovimentacoes(
+    private Map<String, Object> buscarTodasPaginasMovimentacoes(
             String dataInicio,
             String dataTermino,
             String tipoData,
@@ -400,61 +407,91 @@ public class BomControleService {
             Integer idsFornecedor,
             String textoPesquisa,
             String categoria,
+            String tipo,
             int itensPorPagina) {
-        
+
         List<Map<String, Object>> todasMovimentacoes = new ArrayList<>();
         int paginaAtual = 1;
-        int totalPaginas = 1;
+        int totalPaginasEstimadas = 1;
         boolean continuar = true;
-        
+        int paginasProcessadas = 0;
+        int paginasViaFallback = 0;
+        int totalItensEstimados = 0;
+        Instant timestampUltimoBatchValido = null;
+        boolean fallbackDetectado = false;
+        long fallbackReferenciaTime = 0L;
+        boolean fallbackLogEmitido = false;
+
         while (continuar) {
             try {
-                // Usar buscarMovimentacoesApi para buscar apenas uma página (evita loop infinito)
                 Map<String, Object> resultado = buscarMovimentacoesApi(
                         dataInicio, dataTermino, tipoData, idsEmpresa, idsCliente, idsFornecedor,
-                        textoPesquisa, categoria, null, itensPorPagina, paginaAtual);
-                
+                        textoPesquisa, categoria, tipo, itensPorPagina, paginaAtual);
+
+                boolean paginaFallback = resultado == null || Boolean.TRUE.equals(resultado.get("usouFallback"));
+                if (paginaFallback) {
+                    paginasViaFallback++;
+                    long ultimoRateLimitTime = obterUltimoEventoRateLimit();
+                    if (ultimoRateLimitTime <= 0) {
+                        ultimoRateLimitTime = System.currentTimeMillis();
+                    }
+                    if (estaEmJanelaFallback(ultimoRateLimitTime)) {
+                        fallbackDetectado = true;
+                        fallbackReferenciaTime = ultimoRateLimitTime;
+                        if (!fallbackLogEmitido) {
+                            long ttlRestanteMs = calcularTtlRestanteMs(ultimoRateLimitTime);
+                            double ttlRestanteMin = ttlRestanteMs / 60000d;
+                            log.warn("⚠️ Bom Controle retornou fallback na página {} (páginas válidas {}/{}). Registros com fallback: true. TTL do snapshot degradado (CACHE_RESUMO_STALE_TTL={}ms): {}ms (~{} min). Consulte os endpoints /api/bomcontrole/snapshots e /api/bomcontrole/degradacao para acompanhar o painel de degradação.",
+                                    paginaAtual,
+                                    paginasProcessadas,
+                                    totalPaginasEstimadas,
+                                    CACHE_RESUMO_STALE_TTL,
+                                    ttlRestanteMs,
+                                    String.format(Locale.ROOT, "%.2f", ttlRestanteMin));
+                            fallbackLogEmitido = true;
+                        }
+                    }
+                } else {
+                    paginasProcessadas++;
+                    timestampUltimoBatchValido = Instant.now();
+                }
+
                 if (resultado != null && resultado.containsKey("movimentacoes")) {
                     @SuppressWarnings("unchecked")
-                    List<Map<String, Object>> movimentacoes = (List<Map<String, Object>>) resultado.get("movimentacoes");
-                    
-                    if (movimentacoes.isEmpty()) {
-                        continuar = false;
-                    } else {
+                    List<Map<String, Object>> movimentacoes = resultado.get("movimentacoes") instanceof List
+                            ? (List<Map<String, Object>>) resultado.get("movimentacoes")
+                            : Collections.emptyList();
+
+                    if (!movimentacoes.isEmpty()) {
                         todasMovimentacoes.addAll(movimentacoes);
-                        
-                        // Calcular total de páginas baseado no totalItens
-                        Object totalItensObj = resultado.get("total");
-                        int totalItens = totalItensObj instanceof Number ? ((Number) totalItensObj).intValue() : 0;
-                        
-                        // Se temos totalItens, calcular totalPaginas
-                        if (totalItens > 0) {
-                            totalPaginas = (int) Math.ceil((double) totalItens / itensPorPagina);
-                        }
-                        
-                        log.debug("📄 Página {}: {} movimentações encontradas (total acumulado: {}, totalItens: {}, totalPaginas estimado: {})", 
-                                paginaAtual, movimentacoes.size(), todasMovimentacoes.size(), totalItens, totalPaginas);
-                        
-                        // Se retornou menos itens que o esperado, não há mais páginas
-                        // OU se já coletamos todas as movimentações baseado no totalItens
-                        if (movimentacoes.size() < itensPorPagina) {
-                            // Não há mais páginas
+                    }
+
+                    Object totalItensObj = resultado.get("total");
+                    int totalItens = totalItensObj instanceof Number ? ((Number) totalItensObj).intValue() : 0;
+                    if (totalItens > 0) {
+                        totalItensEstimados = totalItens;
+                        totalPaginasEstimadas = (int) Math.ceil((double) totalItens / itensPorPagina);
+                    }
+
+                    log.debug("📄 Página {}: {} movimentações (acumulado: {}, totalItens: {}, paginas estimadas: {}, fallbackPagina={})",
+                            paginaAtual, movimentacoes.size(), todasMovimentacoes.size(), totalItens, totalPaginasEstimadas, paginaFallback);
+
+                    boolean ultimaPaginaPorQtd = movimentacoes.size() < itensPorPagina;
+                    boolean coletouTudoPorTotal = totalItens > 0 && todasMovimentacoes.size() >= totalItens;
+
+                    if (ultimaPaginaPorQtd) {
+                        continuar = false;
+                        log.debug("✅ Última página alcançada (retornou {} < {})", movimentacoes.size(), itensPorPagina);
+                    } else if (coletouTudoPorTotal) {
+                        continuar = false;
+                        log.debug("✅ Todas as movimentações coletadas ({}/{})", todasMovimentacoes.size(), totalItens);
+                    } else {
+                        paginaAtual++;
+                        try {
+                            Thread.sleep(150);
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
                             continuar = false;
-                            log.debug("✅ Última página alcançada (retornou {} < {})", movimentacoes.size(), itensPorPagina);
-                        } else if (totalItens > 0 && todasMovimentacoes.size() >= totalItens) {
-                            // Já coletamos todas as movimentações
-                            continuar = false;
-                            log.debug("✅ Todas as movimentações coletadas ({}/{})", todasMovimentacoes.size(), totalItens);
-                        } else {
-                            // Continuar para próxima página
-                            paginaAtual++;
-                            // Delay entre páginas para evitar rate limiting
-                            try {
-                                Thread.sleep(150);
-                            } catch (InterruptedException e) {
-                                Thread.currentThread().interrupt();
-                                continuar = false;
-                            }
                         }
                     }
                 } else {
@@ -465,9 +502,115 @@ public class BomControleService {
                 continuar = false;
             }
         }
-        
-        log.info("📚 Total de páginas buscadas: {}, total de movimentações coletadas: {}", paginaAtual, todasMovimentacoes.size());
-        return todasMovimentacoes;
+
+        Map<String, Object> resultado = montarResultadoPaginacao(
+                todasMovimentacoes,
+                paginasProcessadas,
+                totalPaginasEstimadas,
+                paginasViaFallback,
+                timestampUltimoBatchValido,
+                fallbackDetectado,
+                fallbackReferenciaTime,
+                totalItensEstimados);
+
+        log.info("📚 Busca paginada concluída. Páginas válidas: {}/{}, fallbackAtivo={}, totalMovimentacoes={}",
+                paginasProcessadas,
+                totalPaginasEstimadas,
+                fallbackDetectado,
+                todasMovimentacoes.size());
+        return resultado;
+    }
+
+    private Map<String, Object> montarResultadoPaginacao(
+            List<Map<String, Object>> movimentacoes,
+            int paginasProcessadas,
+            int paginasEstimadas,
+            int paginasViaFallback,
+            Instant timestampUltimoBatchValido,
+            boolean fallbackAtivo,
+            long fallbackReferenciaTime,
+            int totalItensEstimados) {
+
+        int paginasFaltantes = Math.max(paginasEstimadas - paginasProcessadas, 0);
+        Map<String, Object> fallbackMetadata = new HashMap<>();
+        fallbackMetadata.put("fallbackAtivo", fallbackAtivo);
+        fallbackMetadata.put("paginasProcessadas", paginasProcessadas);
+        fallbackMetadata.put("paginasEstimadas", paginasEstimadas);
+        fallbackMetadata.put("paginasFaltantes", paginasFaltantes);
+        fallbackMetadata.put("paginasViaFallback", paginasViaFallback);
+        fallbackMetadata.put("timestampUltimoBatchValido", timestampUltimoBatchValido != null ? timestampUltimoBatchValido.toString() : null);
+        fallbackMetadata.put("totalItensEstimados", totalItensEstimados);
+        fallbackMetadata.put("totalMovimentacoesParcial", movimentacoes.size());
+
+        if (fallbackAtivo) {
+            long referencia = fallbackReferenciaTime > 0 ? fallbackReferenciaTime : System.currentTimeMillis();
+            long ttlRestante = calcularTtlRestanteMs(referencia);
+            fallbackMetadata.put("ttlFallbackRestanteMs", ttlRestante);
+            fallbackMetadata.put("janelaFallbackInicio", Instant.ofEpochMilli(referencia).toString());
+            fallbackMetadata.put("janelaFallbackFim", Instant.ofEpochMilli(referencia + CACHE_RESUMO_STALE_TTL).toString());
+        }
+
+        Map<String, Object> resultado = new HashMap<>();
+        resultado.put("movimentacoes", movimentacoes);
+        resultado.put("paginasProcessadas", paginasProcessadas);
+        resultado.put("paginasEstimadas", paginasEstimadas);
+        resultado.put("paginasFaltantes", paginasFaltantes);
+        resultado.put("paginasViaFallback", paginasViaFallback);
+        resultado.put("timestampUltimoBatch", timestampUltimoBatchValido != null ? timestampUltimoBatchValido.toString() : null);
+        resultado.put("fallbackAtivo", fallbackAtivo);
+        resultado.put("totalItensEstimados", totalItensEstimados);
+        resultado.put("fallbackMetadata", fallbackMetadata);
+
+        return resultado;
+    }
+
+    private long obterUltimoEventoRateLimit() {
+        try {
+            Map<String, Object> stats = rateLimiter.getStats();
+            Object lastRateLimit = stats.get("lastRateLimitTime");
+            if (lastRateLimit instanceof Number) {
+                return ((Number) lastRateLimit).longValue();
+            }
+        } catch (Exception e) {
+            log.debug("Não foi possível consultar stats do rate limiter: {}", e.getMessage());
+        }
+        return 0L;
+    }
+
+    private boolean estaEmJanelaFallback(long lastRateLimitTime) {
+        if (lastRateLimitTime <= 0) {
+            return false;
+        }
+        return (System.currentTimeMillis() - lastRateLimitTime) < CACHE_RESUMO_STALE_TTL;
+    }
+
+    private long calcularTtlRestanteMs(long fallbackReferenceTime) {
+        long fimJanela = fallbackReferenceTime + CACHE_RESUMO_STALE_TTL;
+        return Math.max(0, fimJanela - System.currentTimeMillis());
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<Map<String, Object>> extrairMovimentacoes(Map<String, Object> resultadoPaginado) {
+        if (resultadoPaginado == null) {
+            return Collections.emptyList();
+        }
+        Object movs = resultadoPaginado.get("movimentacoes");
+        if (movs instanceof List) {
+            return (List<Map<String, Object>>) movs;
+        }
+        return Collections.emptyList();
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> extrairFallbackMetadata(Map<String, Object> resultadoPaginado) {
+        if (resultadoPaginado == null) {
+            return Collections.emptyMap();
+        }
+        Object metadata = resultadoPaginado.get("fallbackMetadata");
+        if (metadata instanceof Map) {
+            return (Map<String, Object>) metadata;
+        }
+        return Collections.emptyMap();
     }
 
     /**
@@ -499,7 +642,7 @@ public class BomControleService {
         // Buscar apenas a página solicitada usando buscarMovimentacoes
         Map<String, Object> resultadoBusca = buscarMovimentacoes(
                 dataInicio, dataTermino, tipoDataParaBuscar, idsEmpresa, idsCliente, idsFornecedor,
-                textoPesquisa, categoria, "despesa", // Filtro de tipo: despesa para contas a pagar
+            textoPesquisa, categoria, "despesa", null, // Filtro de tipo: despesa para contas a pagar
                 itensPorPagina != null ? itensPorPagina : 50,
                 numeroDaPagina != null ? numeroDaPagina : 1);
         
@@ -695,7 +838,7 @@ public class BomControleService {
         // Buscar apenas a página solicitada usando buscarMovimentacoes
         Map<String, Object> resultadoBusca = buscarMovimentacoes(
                 dataInicio, dataTermino, tipoDataParaBuscar, idsEmpresa, idsCliente, idsFornecedor,
-                textoPesquisa, categoria, "receita", // Filtro de tipo: receita para contas a receber
+            textoPesquisa, categoria, "receita", null, // Filtro de tipo: receita para contas a receber
                 itensPorPagina != null ? itensPorPagina : 50,
                 numeroDaPagina != null ? numeroDaPagina : 1);
         
@@ -757,7 +900,31 @@ public class BomControleService {
      */
     // Cache de totais por chave de filtros (para evitar recalcular toda vez)
     private static final Map<String, TotaisCache> cacheTotais = new ConcurrentHashMap<>();
+    private static final Map<String, ResumoFinanceiroCache> cacheResumoFinanceiro = new ConcurrentHashMap<>();
+    private static final Map<String, DfcCache> cacheDfc = new ConcurrentHashMap<>();
     private static final long CACHE_TOTAIS_TTL = 5 * 60 * 1000; // 5 minutos
+    private static final long CACHE_RESUMO_TTL = 2 * 60 * 1000; // 2 minutos
+    private static final long CACHE_RESUMO_STALE_TTL = 30 * 60 * 1000; // 30 minutos para snapshot
+    private static final long CACHE_DFC_TTL = 5 * 60 * 1000; // 5 minutos
+    private static final DateTimeFormatter MES_FORMATTER = DateTimeFormatter.ofPattern("MMM/yy", new Locale("pt", "BR"));
+        private static final List<String> KEYWORDS_FATURAMENTO = List.of(
+            "contrato", "assinatura", "mensal", "faturamento", "servico", "recorrente", "licenca", "plano", "nf"
+        );
+        private static final List<String> KEYWORDS_OUTRAS_ENTRADAS = List.of(
+            "juros", "rendiment", "rebate", "reembolso", "aporte", "capital", "investidor", "dividendo", "ajuste", "premio"
+        );
+        private static final List<String> KEYWORDS_CUSTOS = List.of(
+            "custo", "infra", "servidor", "cloud", "aws", "azure", "gcp", "licenca", "software", "operacao"
+        );
+        private static final List<String> KEYWORDS_ESTRATEGIA = List.of(
+            "marketing", "venda", "comercial", "expansao", "evento", "growth", "campanha", "midia", "publicidade"
+        );
+        private static final List<String> KEYWORDS_INVESTIMENTOS = List.of(
+            "equipamento", "maquina", "capex", "imobilizado", "pesquisa", "desenvolvimento", "implantacao", "upgrade", "melhoria"
+        );
+        private static final List<String> KEYWORDS_FINANCIAMENTO = List.of(
+            "financi", "emprest", "bndes", "leasing", "mutuo", "debenture", "capital de giro", "credito", "banco"
+        );
     
     private static class TotaisCache {
         double totalReceitas;
@@ -776,6 +943,38 @@ public class BomControleService {
             return (System.currentTimeMillis() - timestamp) > CACHE_TOTAIS_TTL;
         }
     }
+
+    private static class ResumoFinanceiroCache {
+        final ResumoFinanceiroDTO resumo;
+        final long timestamp;
+
+        ResumoFinanceiroCache(ResumoFinanceiroDTO resumo) {
+            this.resumo = resumo;
+            this.timestamp = System.currentTimeMillis();
+        }
+
+        boolean isExpired() {
+            return (System.currentTimeMillis() - timestamp) > CACHE_RESUMO_TTL;
+        }
+
+        boolean isOlderThan(long maxAgeMs) {
+            return (System.currentTimeMillis() - timestamp) > maxAgeMs;
+        }
+    }
+
+    private static class DfcCache {
+        final DfcResponseDTO resposta;
+        final long timestamp;
+
+        DfcCache(DfcResponseDTO resposta) {
+            this.resposta = resposta;
+            this.timestamp = System.currentTimeMillis();
+        }
+
+        boolean isExpired() {
+            return (System.currentTimeMillis() - timestamp) > CACHE_DFC_TTL;
+        }
+    }
     
     private String gerarChaveCacheTotais(String dataInicio, String dataTermino, String tipoData,
                                          Integer idsEmpresa, Integer idsCliente, Integer idsFornecedor,
@@ -790,6 +989,13 @@ public class BomControleService {
                 tipo != null ? tipo : "null");
     }
 
+    private String gerarChaveCacheDfc(String dataInicio, String dataTermino, Integer idsEmpresa) {
+        return String.format("dfc:%s:%s:%s",
+                dataInicio,
+                dataTermino,
+                idsEmpresa != null ? idsEmpresa : "null");
+    }
+
     public Map<String, Object> buscarMovimentacoes(
             String dataInicio,
             String dataTermino,
@@ -800,6 +1006,7 @@ public class BomControleService {
             String textoPesquisa,
             String categoria,
             String tipo,
+            String statusPagamento,
             Integer itensPorPagina,
             Integer numeroDaPagina) {
 
@@ -840,6 +1047,26 @@ public class BomControleService {
             // usar DataPadrao que é o mais genérico e captura movimentações independente do tipo de data
             // Isso garante que movimentações com diferentes tipos de data (vencimento, competência, criação) sejam todas encontradas
             String tipoDataParaBuscar = "DataPadrao"; // Sempre usar DataPadrao para garantir todas as movimentações
+
+            String statusFiltro = statusPagamento != null ? statusPagamento.trim().toLowerCase() : null;
+            boolean aplicarFiltroStatus = statusFiltro != null && !statusFiltro.isEmpty() && !"todas".equals(statusFiltro);
+
+            if (aplicarFiltroStatus) {
+                log.info("🎯 Aplicando filtro de status '{}' para movimentações", statusFiltro);
+                return buscarMovimentacoesComFiltroStatus(
+                        dataInicio,
+                        dataTermino,
+                        tipoDataParaBuscar,
+                        idsEmpresaFinal,
+                        idsCliente,
+                        idsFornecedor,
+                        textoPesquisa,
+                        categoria,
+                        tipo,
+                        statusFiltro,
+                        itensPorPagina,
+                        numeroDaPagina);
+            }
             
             log.info("📅 Usando tipoData: {} (DataPadrao garante cobertura completa de todas as movimentações no período)", tipoDataParaBuscar);
             
@@ -859,16 +1086,24 @@ public class BomControleService {
                 // Buscar TODAS as páginas de movimentações para calcular totais corretos
                 // IMPORTANTE: Não passar filtro de tipo aqui, pois queremos calcular totais de receitas E despesas
                 // O filtro de tipo será aplicado apenas na página solicitada, não no cálculo de totais
-                List<Map<String, Object>> todasMovimentacoes = buscarTodasPaginasMovimentacoes(
-                        dataInicio, dataTermino, tipoDataParaBuscar, idsEmpresaFinal, idsCliente, idsFornecedor,
-                        textoPesquisa, categoria, 
-                        50); // Usar 50 itens por página para evitar rate limit
-                
+                Map<String, Object> resultadoPaginado = buscarTodasPaginasMovimentacoes(
+                    dataInicio, dataTermino, tipoDataParaBuscar, idsEmpresaFinal, idsCliente, idsFornecedor,
+                    textoPesquisa, categoria, 
+                    null,
+                    50); // Usar 50 itens por página para evitar rate limit
+
+                List<Map<String, Object>> todasMovimentacoes = extrairMovimentacoes(resultadoPaginado);
+                boolean fallbackAtivo = resultadoPaginado != null && Boolean.TRUE.equals(resultadoPaginado.get("fallbackAtivo"));
+                if (fallbackAtivo) {
+                    log.warn("⚠️ Totais gerais calculados com dados possivelmente degradados (fallback ativo). Metadata: {}",
+                            extrairFallbackMetadata(resultadoPaginado));
+                }
+
                 // Calcular totais de todas as movimentações coletadas
                 double totalReceitasGeral = 0;
                 double totalDespesasGeral = 0;
                 
-                if (todasMovimentacoes != null && !todasMovimentacoes.isEmpty()) {
+                if (!todasMovimentacoes.isEmpty()) {
                     log.info("📊 Calculando totais de {} movimentações coletadas...", todasMovimentacoes.size());
                     
                     for (Map<String, Object> mov : todasMovimentacoes) {
@@ -946,6 +1181,148 @@ public class BomControleService {
             // Sempre limpar cache do ThreadLocal após processar a requisição (mesmo em caso de exceção)
             limparCacheRequisicao();
         }
+    }
+
+    private Map<String, Object> buscarMovimentacoesComFiltroStatus(
+            String dataInicio,
+            String dataTermino,
+            String tipoData,
+            Integer idsEmpresa,
+            Integer idsCliente,
+            Integer idsFornecedor,
+            String textoPesquisa,
+            String categoria,
+            String tipo,
+            String statusFiltro,
+            Integer itensPorPagina,
+            Integer numeroDaPagina) {
+
+        int itensPagina = (itensPorPagina != null && itensPorPagina > 0) ? itensPorPagina : 50;
+        int paginaSolicitada = (numeroDaPagina != null && numeroDaPagina > 0) ? numeroDaPagina : 1;
+        int itensPorPaginaConsulta = Math.max(itensPagina, 50);
+
+        Map<String, Object> resultadoPaginado = buscarTodasPaginasMovimentacoes(
+                dataInicio,
+                dataTermino,
+                tipoData,
+                idsEmpresa,
+                idsCliente,
+                idsFornecedor,
+                textoPesquisa,
+                categoria,
+                tipo,
+            itensPorPaginaConsulta);
+
+        List<Map<String, Object>> todasMovimentacoes = extrairMovimentacoes(resultadoPaginado);
+        Map<String, Object> fallbackMetadata = extrairFallbackMetadata(resultadoPaginado);
+        boolean fallbackAtivo = resultadoPaginado != null && Boolean.TRUE.equals(resultadoPaginado.get("fallbackAtivo"));
+        if (fallbackAtivo) {
+            log.warn("⚠️ Filtro por status trabalhando com dados degradados. Metadata: {}", fallbackMetadata);
+        }
+
+        List<Map<String, Object>> filtradas = todasMovimentacoes.stream()
+                .filter(mov -> correspondeAoStatus(mov, statusFiltro))
+                .collect(java.util.stream.Collectors.toList());
+
+        int totalFiltradas = filtradas.size();
+        int totalPaginas = totalFiltradas == 0 ? 1 : (int) Math.ceil((double) totalFiltradas / itensPagina);
+        if (totalFiltradas == 0) {
+            paginaSolicitada = 1;
+        } else if (paginaSolicitada > totalPaginas) {
+            paginaSolicitada = totalPaginas;
+        }
+
+        int fromIndex = (paginaSolicitada - 1) * itensPagina;
+        if (fromIndex > totalFiltradas) {
+            fromIndex = Math.max(0, totalFiltradas - itensPagina);
+        }
+        int toIndex = Math.min(fromIndex + itensPagina, totalFiltradas);
+
+        List<Map<String, Object>> pagina = filtradas.subList(fromIndex, toIndex);
+
+        double totalReceitas = 0;
+        double totalDespesas = 0;
+        for (Map<String, Object> mov : filtradas) {
+            double valor = extrairValorMovimentacao(mov.get("Valor"));
+            boolean debito = isDebito(mov.get("Debito"));
+            if (debito) {
+                totalDespesas += valor;
+            } else {
+                totalReceitas += valor;
+            }
+        }
+
+        Map<String, Object> resultado = new HashMap<>();
+        resultado.put("movimentacoes", new ArrayList<>(pagina));
+        resultado.put("total", totalFiltradas);
+        resultado.put("totalReceitas", totalReceitas);
+        resultado.put("totalDespesas", totalDespesas);
+        resultado.put("saldoLiquido", totalReceitas - totalDespesas);
+        resultado.put("dataInicio", dataInicio);
+        resultado.put("dataTermino", dataTermino);
+        resultado.put("tipoData", tipoData);
+        resultado.put("endpointUsado", "/api/bomcontrole/movimentacoes");
+        resultado.put("paginacao", Map.of(
+                "itensPorPagina", itensPagina,
+                "numeroDaPagina", paginaSolicitada,
+                "totalItens", totalFiltradas,
+                "totalPaginas", totalFiltradas == 0 ? 1 : totalPaginas
+        ));
+
+        resultado.put("fallbackAtivo", fallbackAtivo);
+        resultado.put("fallbackMetadata", fallbackMetadata);
+
+        return resultado;
+    }
+
+    private boolean correspondeAoStatus(Map<String, Object> movimentacao, String statusFiltro) {
+        if (statusFiltro == null || statusFiltro.isBlank() || "todas".equals(statusFiltro)) {
+            return true;
+        }
+
+        Object dataQuitacao = movimentacao.get("DataQuitacao");
+        boolean recebido;
+        if (dataQuitacao instanceof String) {
+            recebido = !((String) dataQuitacao).isBlank();
+        } else {
+            recebido = dataQuitacao != null;
+        }
+
+        if ("pendente".equals(statusFiltro)) {
+            return !recebido;
+        }
+        if ("recebido".equals(statusFiltro) || "liquidado".equals(statusFiltro)) {
+            return recebido;
+        }
+        return true;
+    }
+
+    private double extrairValorMovimentacao(Object valorObj) {
+        if (valorObj instanceof Number) {
+            return ((Number) valorObj).doubleValue();
+        }
+        if (valorObj instanceof String) {
+            try {
+                String sanitized = ((String) valorObj).replace("R$", "").replace(" ", "").replace(".", "").replace(",", ".");
+                return Double.parseDouble(sanitized);
+            } catch (NumberFormatException e) {
+                return 0;
+            }
+        }
+        return 0;
+    }
+
+    private boolean isDebito(Object debitoObj) {
+        if (debitoObj instanceof Boolean) {
+            return (Boolean) debitoObj;
+        }
+        if (debitoObj instanceof Number) {
+            return ((Number) debitoObj).intValue() != 0;
+        }
+        if (debitoObj instanceof String) {
+            return Boolean.parseBoolean(((String) debitoObj));
+        }
+        return false;
     }
     
     /**
@@ -1103,6 +1480,184 @@ public class BomControleService {
             limparCacheRequisicao();
         }
     }
+
+    public ResumoFinanceiroDTO gerarResumoFinanceiro(
+            String dataInicio,
+            String dataTermino,
+            String tipoData,
+            Integer idsEmpresa,
+            Integer idsCliente,
+            Integer idsFornecedor,
+            String textoPesquisa,
+            String categoria,
+            String tipo) {
+
+        if (dataInicio == null || dataInicio.isBlank()) {
+            throw new IllegalArgumentException("Parâmetro 'dataInicio' é obrigatório para o resumo financeiro");
+        }
+        if (dataTermino == null || dataTermino.isBlank()) {
+            throw new IllegalArgumentException("Parâmetro 'dataTermino' é obrigatório para o resumo financeiro");
+        }
+
+        String tipoDataParaBuscar = "DataPadrao";
+        Integer idsEmpresaFinal = idsEmpresa != null ? idsEmpresa : obterOuBuscarEmpresaId();
+        String chaveCache = gerarChaveCacheTotais(
+                dataInicio, dataTermino, tipoDataParaBuscar,
+                idsEmpresaFinal, idsCliente, idsFornecedor,
+                textoPesquisa, categoria, tipo) + ":resumo";
+
+        try {
+            ResumoFinanceiroCache cache = cacheResumoFinanceiro.get(chaveCache);
+            if (cache != null && !cache.isExpired()) {
+                log.debug("♻️ Resumo financeiro atendido via cache para chave {}", chaveCache);
+                return cache.resumo.toBuilder()
+                        .usandoCache(true)
+                        .fonteDados("bom-controle/cache")
+                        .build();
+            }
+
+            Map<String, Object> resultadoPaginado = buscarTodasPaginasMovimentacoes(
+                    dataInicio,
+                    dataTermino,
+                    tipoDataParaBuscar,
+                    idsEmpresaFinal,
+                    idsCliente,
+                    idsFornecedor,
+                    textoPesquisa,
+                    categoria,
+                    null,
+                    50);
+
+            List<Map<String, Object>> todasMovimentacoes = extrairMovimentacoes(resultadoPaginado);
+            Map<String, Object> fallbackMetadata = extrairFallbackMetadata(resultadoPaginado);
+            boolean fallbackAtivo = resultadoPaginado != null && Boolean.TRUE.equals(resultadoPaginado.get("fallbackAtivo"));
+            if (fallbackAtivo) {
+                log.warn("⚠️ Resumo financeiro calculado durante janela de fallback. Metadata: {}", fallbackMetadata);
+            }
+
+            double totalReceitas = 0;
+            double receitasLiquidadas = 0;
+            double receitasPendentes = 0;
+            long totalReceitasCount = 0;
+            long receitasPendentesCount = 0;
+
+            double totalDespesas = 0;
+            double despesasPagas = 0;
+            double despesasPendentes = 0;
+            long totalDespesasCount = 0;
+            long despesasPendentesCount = 0;
+
+            for (Map<String, Object> mov : todasMovimentacoes) {
+                boolean isDebito = converterParaBooleano(mov.get("Debito"));
+                double valor = extrairValor(mov.get("Valor"));
+                boolean liquidado = isLiquidado(mov);
+
+                if (isDebito) {
+                    totalDespesas += valor;
+                    totalDespesasCount++;
+                    if (liquidado) {
+                        despesasPagas += valor;
+                    } else {
+                        despesasPendentes += valor;
+                        despesasPendentesCount++;
+                    }
+                } else {
+                    totalReceitas += valor;
+                    totalReceitasCount++;
+                    if (liquidado) {
+                        receitasLiquidadas += valor;
+                    } else {
+                        receitasPendentes += valor;
+                        receitasPendentesCount++;
+                    }
+                }
+            }
+
+            double saldoDisponivel = receitasLiquidadas - despesasPagas;
+            double saldoProjetado = totalReceitas - totalDespesas;
+
+                String fonteDados = fallbackAtivo ? "bom-controle/fallback" : "bom-controle/api";
+
+                ResumoFinanceiroDTO resumo = ResumoFinanceiroDTO.builder()
+                    .periodo(ResumoFinanceiroDTO.PeriodoResumo.builder()
+                            .dataInicio(dataInicio)
+                            .dataTermino(dataTermino)
+                            .build())
+                    .contasReceber(ResumoFinanceiroDTO.BlocoResumo.builder()
+                            .totalGeral(totalReceitas)
+                            .totalLiquidado(receitasLiquidadas)
+                            .totalPendente(receitasPendentes)
+                            .totalContas(totalReceitasCount)
+                            .contasPendentes(receitasPendentesCount)
+                            .build())
+                    .contasPagar(ResumoFinanceiroDTO.BlocoResumo.builder()
+                            .totalGeral(totalDespesas)
+                            .totalLiquidado(despesasPagas)
+                            .totalPendente(despesasPendentes)
+                            .totalContas(totalDespesasCount)
+                            .contasPendentes(despesasPendentesCount)
+                            .build())
+                    .saldoDisponivel(saldoDisponivel)
+                    .saldoProjetado(saldoProjetado)
+                    .totalMovimentacoes(todasMovimentacoes.size())
+                    .usandoCache(false)
+                        .fonteDados(fonteDados)
+                    .atualizadoEm(LocalDateTime.now().toString())
+                        .fallbackAtivo(fallbackAtivo)
+                        .fallbackMetadata(fallbackMetadata)
+                    .build();
+
+            cacheResumoFinanceiro.put(chaveCache, new ResumoFinanceiroCache(resumo));
+            return resumo;
+        } finally {
+            limparCacheRequisicao();
+        }
+    }
+
+            public ResumoFinanceiroPeriodosDTO gerarResumoFinanceiroPeriodosPadrao(
+                String tipoData,
+                Integer idsEmpresa,
+                Integer idsCliente,
+                Integer idsFornecedor,
+                String textoPesquisa,
+                String categoria,
+                String tipo) {
+
+            LocalDate hoje = LocalDate.now();
+            String inicioMes = hoje.withDayOfMonth(1).toString();
+            String fimMes = hoje.toString();
+            String inicioAno = hoje.withDayOfYear(1).toString();
+            String fimAno = hoje.toString();
+
+            ResumoFinanceiroDTO mesAtual = gerarResumoFinanceiro(
+                inicioMes,
+                fimMes,
+                tipoData,
+                idsEmpresa,
+                idsCliente,
+                idsFornecedor,
+                textoPesquisa,
+                categoria,
+                tipo
+            );
+
+            ResumoFinanceiroDTO anoAtual = gerarResumoFinanceiro(
+                inicioAno,
+                fimAno,
+                tipoData,
+                idsEmpresa,
+                idsCliente,
+                idsFornecedor,
+                textoPesquisa,
+                categoria,
+                tipo
+            );
+
+            return ResumoFinanceiroPeriodosDTO.builder()
+                .mesAtual(mesAtual)
+                .anoAtual(anoAtual)
+                .build();
+            }
     
     /**
      * Gera chave única de cache para movimentações
@@ -1128,35 +1683,84 @@ public class BomControleService {
      * Nota: A API do Bom Controle não possui endpoint específico para DFC
      * Este método calcula o DFC baseado nas movimentações
      */
-    public Map<String, Object> gerarDFC(String dataInicio, String dataTermino, boolean usarCache, boolean forcarAtualizacao) {
+    public DfcResponseDTO gerarDFC(
+            String dataInicio,
+            String dataTermino,
+            Boolean usarCache,
+            Boolean forcarAtualizacao,
+            Integer idsEmpresa) {
+
         if (mockEnabled) {
             return criarRespostaMockDFC(dataInicio, dataTermino);
         }
 
-        try {
-            // Buscar todas as movimentações do período para calcular DFC
-            String dataInicioFormatada = formatarDataComHora(dataInicio, true);
-            String dataTerminoFormatada = formatarDataComHora(dataTermino, false);
-            
-            Map<String, Object> response = webClient.get()
-                    .uri(uriBuilder -> {
-                        uriBuilder.path("/integracao/Financeiro/Pesquisar");
-                        uriBuilder.queryParam("dataInicio", dataInicioFormatada);
-                        uriBuilder.queryParam("dataTermino", dataTerminoFormatada);
-                        uriBuilder.queryParam("tipoData", "DataCompetencia");
-                        uriBuilder.queryParam("paginacao.itensPorPagina", 100); // Máximo permitido
-                        uriBuilder.queryParam("paginacao.numeroDaPagina", 1);
-                        return uriBuilder.build();
-                    })
-                    .retrieve()
-                    .bodyToMono(Map.class)
-                    .block();
+        if (dataInicio == null || dataInicio.isBlank()) {
+            throw new IllegalArgumentException("Parâmetro 'dataInicio' é obrigatório para o DFC");
+        }
+        if (dataTermino == null || dataTermino.isBlank()) {
+            throw new IllegalArgumentException("Parâmetro 'dataTermino' é obrigatório para o DFC");
+        }
 
-            // Processar movimentações e gerar DFC
-            return processarDFC(response, dataInicio, dataTermino);
-        } catch (Exception e) {
-            log.error("Erro ao gerar DFC do Bom Controle", e);
-            throw new RuntimeException("Erro ao gerar DFC: " + e.getMessage(), e);
+        LocalDate inicio = LocalDate.parse(dataInicio);
+        LocalDate termino = LocalDate.parse(dataTermino);
+        if (termino.isBefore(inicio)) {
+            throw new IllegalArgumentException("'dataTermino' deve ser maior ou igual a 'dataInicio'");
+        }
+
+        boolean usarCacheEfetivo = usarCache == null || usarCache;
+        boolean forcarAtualizacaoEfetivo = forcarAtualizacao != null && forcarAtualizacao;
+        Integer idsEmpresaFinal = idsEmpresa != null ? idsEmpresa : obterOuBuscarEmpresaId();
+        String chaveCache = gerarChaveCacheDfc(dataInicio, dataTermino, idsEmpresaFinal);
+
+        try {
+            if (usarCacheEfetivo && !forcarAtualizacaoEfetivo) {
+                DfcCache cache = cacheDfc.get(chaveCache);
+                if (cache != null && !cache.isExpired()) {
+                    log.debug("♻️ DFC atendido via cache para chave {}", chaveCache);
+                    return cache.resposta.toBuilder()
+                            .usandoCache(true)
+                            .fonteDados("bom-controle/cache")
+                            .build();
+                }
+            }
+
+            long inicioProcessamento = System.currentTimeMillis();
+
+            Map<String, Object> resultadoPaginado = buscarTodasPaginasMovimentacoes(
+                    dataInicio,
+                    dataTermino,
+                    "DataQuitacao", // Alterado de DataCompetencia para DataQuitacao (Regime de Caixa)
+                    idsEmpresaFinal,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    50);
+
+            List<Map<String, Object>> movimentacoes = extrairMovimentacoes(resultadoPaginado);
+            Map<String, Object> fallbackMetadata = extrairFallbackMetadata(resultadoPaginado);
+            boolean fallbackAtivo = resultadoPaginado != null && Boolean.TRUE.equals(resultadoPaginado.get("fallbackAtivo"));
+            long paginasProcessadas = extrairLong(resultadoPaginado, "paginasProcessadas");
+            long paginasEstimadas = extrairLong(resultadoPaginado, "paginasEstimadas");
+            long totalDisponiveis = extrairLong(resultadoPaginado, "totalItensEstimados");
+            long tempoProcessamentoMs = System.currentTimeMillis() - inicioProcessamento;
+
+            DfcResponseDTO resposta = montarDfcResponse(
+                    movimentacoes,
+                    inicio,
+                    termino,
+                    fallbackAtivo,
+                    fallbackMetadata,
+                    paginasProcessadas,
+                    paginasEstimadas,
+                    totalDisponiveis,
+                    tempoProcessamentoMs);
+
+            cacheDfc.put(chaveCache, new DfcCache(resposta));
+            return resposta;
+        } finally {
+            limparCacheRequisicao();
         }
     }
 
@@ -1303,10 +1907,11 @@ public class BomControleService {
             Integer itensPorPagina,
             Integer numeroDaPagina) {
 
+        boolean respostaValida = response != null;
         List<Map<String, Object>> movimentacoes = new ArrayList<>();
         Integer totalItens = 0;
         
-        if (response != null) {
+        if (respostaValida) {
             log.debug("Processando resposta: chaves disponíveis={}", response.keySet());
             
             // Bom Controle retorna "Itens" e "TotalItens"
@@ -1326,7 +1931,9 @@ public class BomControleService {
             if (response.containsKey("Itens")) {
                 Object itens = response.get("Itens");
                 if (itens instanceof List) {
-                    movimentacoes = (List<Map<String, Object>>) itens;
+                    @SuppressWarnings("unchecked")
+                    List<Map<String, Object>> itensLista = (List<Map<String, Object>>) itens;
+                    movimentacoes = itensLista;
                     log.debug("Movimentações extraídas: {} (TODOS os campos preservados)", movimentacoes.size());
                     
                     // Verificar se todas as movimentações têm os campos esperados
@@ -1388,78 +1995,574 @@ public class BomControleService {
                 "numeroDaPagina", numeroDaPaginaFinal,
                 "totalItens", totalItensFinal
         ));
+        resultado.put("usouFallback", !respostaValida);
 
         return resultado;
     }
 
-    /**
-     * Processa resposta para gerar DFC
-     */
-    private Map<String, Object> processarDFC(Map<String, Object> response, String dataInicio, String dataTermino) {
-        List<Map<String, Object>> movimentacoes = new ArrayList<>();
-        
-        if (response != null && response.containsKey("Itens")) {
-            Object itens = response.get("Itens");
-            if (itens instanceof List) {
-                movimentacoes = (List<Map<String, Object>>) itens;
-            }
+    private DfcResponseDTO montarDfcResponse(
+            List<Map<String, Object>> movimentacoes,
+            LocalDate dataInicio,
+            LocalDate dataTermino,
+            boolean fallbackAtivo,
+            Map<String, Object> fallbackMetadata,
+            long paginasProcessadas,
+            long paginasEstimadas,
+            long totalDisponiveis,
+            long tempoProcessamentoMs) {
+
+        List<YearMonth> intervalo = gerarIntervaloMensal(dataInicio, dataTermino);
+        if (intervalo.isEmpty()) {
+            intervalo = List.of(YearMonth.from(dataInicio));
         }
 
-        // Agrupar por categoria e calcular totais
-        Map<String, Double> receitasPorCategoria = new HashMap<>();
-        Map<String, Double> despesasPorCategoria = new HashMap<>();
+        Map<YearMonth, Integer> indicePorMes = new HashMap<>();
+        for (int i = 0; i < intervalo.size(); i++) {
+            indicePorMes.put(intervalo.get(i), i);
+        }
+
+        Map<String, LinhaDfcAccumulator> acumuladores = new LinkedHashMap<>();
+        double[] receitasPorMes = new double[intervalo.size()];
+        double[] despesasPorMes = new double[intervalo.size()];
         double totalReceitas = 0;
         double totalDespesas = 0;
+        Set<String> clientesDistintos = new HashSet<>();
 
-        for (Map<String, Object> mov : movimentacoes) {
-            Object debitoObj = mov.get("Debito");
-            boolean isDebito = debitoObj instanceof Boolean ? (Boolean) debitoObj : false;
-            Object valorObj = mov.get("Valor");
-            double valor = valorObj instanceof Number ? ((Number) valorObj).doubleValue() : 0;
-            
-            String categoria = (String) mov.getOrDefault("NomeCategoriaFinanceira", "Sem Categoria");
+        for (Map<String, Object> movimentacao : movimentacoes) {
+            LocalDate dataMov = extrairDataMovimentacao(movimentacao);
+            if (dataMov == null) {
+                continue;
+            }
 
-            if (isDebito) {
-                totalDespesas += valor;
-                despesasPorCategoria.put(categoria, despesasPorCategoria.getOrDefault(categoria, 0.0) + valor);
-            } else {
+            YearMonth competencia = YearMonth.from(dataMov);
+            Integer indiceMes = indicePorMes.get(competencia);
+            if (indiceMes == null) {
+                continue;
+            }
+
+            double valor = Math.abs(extrairValor(movimentacao.get("Valor")));
+            if (valor == 0) {
+                continue;
+            }
+
+                DfcGrupo grupo = classificarGrupo(movimentacao);
+            if (grupo == DfcGrupo.TRANSFERENCIA_INTERNA) {
+                continue;
+            }
+
+            String nomeLinha = extrairNomeLinhaDfc(movimentacao);
+            String chaveLinha = grupo.name() + "|" + nomeLinha;
+                DfcGrupo grupoFinal = grupo;
+                String nomeLinhaFinal = nomeLinha;
+                int tamanhoIntervalo = intervalo.size();
+            LinhaDfcAccumulator accumulator = acumuladores.computeIfAbsent(
+                    chaveLinha,
+                    key -> new LinhaDfcAccumulator(grupoFinal, nomeLinhaFinal, tamanhoIntervalo));
+
+            accumulator.adicionarValor(indiceMes, valor);
+
+            if (grupo.isReceita()) {
                 totalReceitas += valor;
-                receitasPorCategoria.put(categoria, receitasPorCategoria.getOrDefault(categoria, 0.0) + valor);
+                receitasPorMes[indiceMes] += valor;
+            } else if (grupo.isDespesa()) {
+                totalDespesas += valor;
+                despesasPorMes[indiceMes] += valor;
+            }
+
+            registrarCliente(movimentacao, clientesDistintos);
+        }
+
+        List<DfcResponseDTO.Linha> linhas = montarLinhasOrdenadas(
+                acumuladores,
+                intervalo.size(),
+                receitasPorMes,
+                despesasPorMes);
+
+        double resultado = totalReceitas - totalDespesas;
+        double margemPercentual = totalReceitas == 0 ? 0 : (resultado / totalReceitas) * 100d;
+        double ticketMedio = clientesDistintos.isEmpty() ? 0 : totalReceitas / clientesDistintos.size();
+        double burnRateMensal = intervalo.isEmpty() ? 0 : totalDespesas / intervalo.size();
+
+        DfcResponseDTO.Indicadores indicadores = DfcResponseDTO.Indicadores.builder()
+                .faturamentoNovosContratos(somarGrupo(acumuladores, DfcGrupo.FATURAMENTO))
+                .receitasOperacionais(somarGrupo(acumuladores, DfcGrupo.RECEITA_OPERACIONAL))
+                .outrasEntradas(somarGrupo(acumuladores, DfcGrupo.OUTRAS_ENTRADAS))
+                .custosOperacionais(somarGrupo(acumuladores, DfcGrupo.CUSTO_OPERACIONAL))
+                .despesasOperacionais(somarGrupo(acumuladores, DfcGrupo.DESPESA_OPERACIONAL))
+                .atividadesEstrategicas(somarGrupo(acumuladores, DfcGrupo.ATIVIDADE_ESTRATEGICA))
+                .investimentos(somarGrupo(acumuladores, DfcGrupo.INVESTIMENTO))
+                .financiamentos(somarGrupo(acumuladores, DfcGrupo.FINANCIAMENTO))
+                .totalReceitas(totalReceitas)
+                .totalDespesas(totalDespesas)
+                .resultado(resultado)
+                .margemPercentual(margemPercentual)
+                .ticketMedio(ticketMedio)
+                .burnRateMensal(burnRateMensal)
+                .build();
+
+        return DfcResponseDTO.builder()
+                .periodo(DfcResponseDTO.Periodo.builder()
+                        .dataInicio(dataInicio.toString())
+                        .dataTermino(dataTermino.toString())
+                        .build())
+                .meses(formatarMeses(intervalo))
+                .linhas(linhas)
+                .indicadores(indicadores)
+                .fonteDados(fallbackAtivo ? "bom-controle/fallback" : "bom-controle/api")
+                .fallbackAtivo(fallbackAtivo)
+                .fallbackMetadata(fallbackMetadata)
+                .totalMovimentacoesProcessadas(movimentacoes.size())
+                .totalMovimentacoesDisponiveis(totalDisponiveis > 0 ? totalDisponiveis : movimentacoes.size())
+                .paginasProcessadas(paginasProcessadas)
+                .paginasEstimadas(paginasEstimadas)
+                .tempoProcessamentoMs(tempoProcessamentoMs)
+                .usandoCache(false)
+                .atualizadoEm(LocalDateTime.now().toString())
+                .build();
+    }
+
+    private List<DfcResponseDTO.Linha> montarLinhasOrdenadas(
+            Map<String, LinhaDfcAccumulator> acumuladores,
+            int quantidadeMeses,
+            double[] receitasPorMes,
+            double[] despesasPorMes) {
+
+        List<DfcResponseDTO.Linha> linhas = new ArrayList<>();
+        linhas.add(criarLinhaSecao("FATURAMENTO (NOVOS CONTRATOS)", quantidadeMeses));
+        adicionarLinhasPorGrupo(linhas, acumuladores, DfcGrupo.FATURAMENTO);
+
+        linhas.add(criarLinhaSecao("TOTAL RECEITAS", quantidadeMeses));
+        adicionarLinhasPorGrupo(linhas, acumuladores, DfcGrupo.RECEITA_OPERACIONAL);
+        adicionarLinhasPorGrupo(linhas, acumuladores, DfcGrupo.OUTRAS_ENTRADAS);
+        linhas.add(criarSubtotalLinha("Subtotal Receitas", "SUBTOTAL_RECEITA", receitasPorMes));
+
+        linhas.add(criarLinhaSecao("TOTAL DESPESAS", quantidadeMeses));
+        adicionarLinhasPorGrupo(linhas, acumuladores, DfcGrupo.CUSTO_OPERACIONAL);
+        adicionarLinhasPorGrupo(linhas, acumuladores, DfcGrupo.DESPESA_OPERACIONAL);
+        adicionarLinhasPorGrupo(linhas, acumuladores, DfcGrupo.ATIVIDADE_ESTRATEGICA);
+        adicionarLinhasPorGrupo(linhas, acumuladores, DfcGrupo.INVESTIMENTO);
+        adicionarLinhasPorGrupo(linhas, acumuladores, DfcGrupo.FINANCIAMENTO);
+        linhas.add(criarSubtotalLinha("Subtotal Despesas", "SUBTOTAL_DESPESA", despesasPorMes));
+
+        linhas.add(criarResultadoLinha(receitasPorMes, despesasPorMes));
+        return linhas;
+    }
+
+    private void adicionarLinhasPorGrupo(List<DfcResponseDTO.Linha> destino,
+                                         Map<String, LinhaDfcAccumulator> acumuladores,
+                                         DfcGrupo grupo) {
+
+        List<LinhaDfcAccumulator> linhas = acumuladores.values().stream()
+                .filter(acc -> acc.grupo == grupo)
+                .sorted(Comparator.comparingDouble(LinhaDfcAccumulator::getTotal).reversed())
+                .collect(Collectors.toList());
+
+        for (LinhaDfcAccumulator accumulator : linhas) {
+            destino.add(accumulator.toDto());
+        }
+    }
+
+    private DfcResponseDTO.Linha criarLinhaSecao(String nome, int quantidadeMeses) {
+        return DfcResponseDTO.Linha.builder()
+                .nome(nome)
+                .tipo("SECAO")
+                .nivel(0)
+                .valores(criarListaNula(quantidadeMeses))
+                .total(0)
+                .media(0)
+                .build();
+    }
+
+    private static DfcResponseDTO.Linha criarSubtotalLinha(String nome, String tipo, double[] valores) {
+        double total = Arrays.stream(valores).sum();
+        return DfcResponseDTO.Linha.builder()
+                .nome(nome)
+                .tipo(tipo)
+                .nivel(1)
+                .valores(converterArrayParaLista(valores))
+                .total(total)
+                .media(calcularMedia(valores))
+                .build();
+    }
+
+    private static DfcResponseDTO.Linha criarResultadoLinha(double[] receitasPorMes, double[] despesasPorMes) {
+        double[] resultado = new double[receitasPorMes.length];
+        for (int i = 0; i < receitasPorMes.length; i++) {
+            resultado[i] = receitasPorMes[i] - despesasPorMes[i];
+        }
+        double total = Arrays.stream(resultado).sum();
+        return DfcResponseDTO.Linha.builder()
+                .nome("RESULTADO")
+                .tipo("RESULTADO")
+                .nivel(0)
+                .valores(converterArrayParaLista(resultado))
+                .total(total)
+                .media(calcularMedia(resultado))
+                .build();
+    }
+
+    private static List<Double> converterArrayParaLista(double[] valores) {
+        List<Double> lista = new ArrayList<>(valores.length);
+        for (double valor : valores) {
+            lista.add(arredondar(valor));
+        }
+        return lista;
+    }
+
+    private List<Double> criarListaNula(int tamanho) {
+        List<Double> valores = new ArrayList<>(tamanho);
+        for (int i = 0; i < tamanho; i++) {
+            valores.add(null);
+        }
+        return valores;
+    }
+
+    private static double calcularMedia(double[] valores) {
+        if (valores.length == 0) {
+            return 0;
+        }
+        double soma = 0;
+        int mesesComValor = 0;
+        for (double valor : valores) {
+            soma += valor;
+            if (valor != 0) {
+                mesesComValor++;
             }
         }
+        int divisor = mesesComValor > 0 ? mesesComValor : valores.length;
+        return divisor == 0 ? 0 : soma / divisor;
+    }
 
-        // Montar estrutura do DFC
-        List<Map<String, Object>> dfc = new ArrayList<>();
-        
-        // Receitas
-        for (Map.Entry<String, Double> entry : receitasPorCategoria.entrySet()) {
-            dfc.add(Map.of(
-                    "tipo", "Receita",
-                    "nome", entry.getKey(),
-                    "nivel", 1,
-                    "valor", entry.getValue()
-            ));
-        }
-        
-        // Despesas
-        for (Map.Entry<String, Double> entry : despesasPorCategoria.entrySet()) {
-            dfc.add(Map.of(
-                    "tipo", "Despesa",
-                    "nome", entry.getKey(),
-                    "nivel", 1,
-                    "valor", entry.getValue()
-            ));
-        }
+    private double somarGrupo(Map<String, LinhaDfcAccumulator> acumuladores, DfcGrupo grupo) {
+        return acumuladores.values().stream()
+                .filter(acc -> acc.grupo == grupo)
+                .mapToDouble(LinhaDfcAccumulator::getTotal)
+                .sum();
+    }
 
-        return Map.of(
-                "dfc", dfc,
-                "totalReceitas", totalReceitas,
-                "totalDespesas", totalDespesas,
-                "resultado", totalReceitas - totalDespesas,
-                "dataInicio", dataInicio != null ? dataInicio : "",
-                "dataTermino", dataTermino != null ? dataTermino : "",
-                "totalMovimentacoes", movimentacoes.size()
+    private void registrarCliente(Map<String, Object> movimentacao, Set<String> clientesDistintos) {
+        Object idCliente = movimentacao.get("IdCliente");
+        if (idCliente != null && !idCliente.toString().isBlank()) {
+            clientesDistintos.add(idCliente.toString());
+            return;
+        }
+        Object nomeCliente = movimentacao.get("NomeClienteFornecedor");
+        if (nomeCliente instanceof String nome && !nome.isBlank()) {
+            clientesDistintos.add(nome);
+        }
+    }
+
+    private LocalDate extrairDataMovimentacao(Map<String, Object> movimentacao) {
+        // DFC (Demonstrativo de Fluxo de Caixa) segue o Regime de Caixa.
+        // A prioridade deve ser a data em que o dinheiro efetivamente entrou ou saiu da conta.
+        List<String> campos = List.of(
+                "DataQuitacao",      // 1. Quando foi efetivamente pago/recebido (realizado)
+                "DataPagamento",     // 2. Alternativa para quitação
+                "DataVencimento",    // 3. Quando deveria ser pago/recebido (projetado)
+                "DataPrevista",      // 4. Alternativa para vencimento
+                "DataCompetencia",   // 5. Quando o fato gerador ocorreu (último recurso)
+                "DataCriacaoParcela" // 6. Data de criação do registro
         );
+        for (String campo : campos) {
+            LocalDate data = converterParaData(movimentacao.get(campo));
+            if (data != null) {
+                return data;
+            }
+        }
+        return null;
+    }
+
+    private LocalDate converterParaData(Object valor) {
+        if (valor instanceof LocalDate data) {
+            return data;
+        }
+        if (valor instanceof LocalDateTime dataHora) {
+            return dataHora.toLocalDate();
+        }
+        if (valor instanceof String texto && !texto.isBlank()) {
+            String normalizado = texto.trim();
+            try {
+                if (normalizado.length() >= 10) {
+                    return LocalDate.parse(normalizado.substring(0, 10));
+                }
+                return LocalDate.parse(normalizado);
+            } catch (Exception e) {
+                try {
+                    return LocalDateTime.parse(normalizado).toLocalDate();
+                } catch (Exception ignored) {
+                    return null;
+                }
+            }
+        }
+        return null;
+    }
+
+    private DfcGrupo classificarGrupo(Map<String, Object> movimentacao) {
+        if (pareceTransferenciaInterna(movimentacao)) {
+            return DfcGrupo.TRANSFERENCIA_INTERNA;
+        }
+
+        boolean debito = converterParaBooleano(movimentacao.get("Debito"));
+        String categoria = normalizarTexto(movimentacao.get("NomeCategoriaFinanceira"));
+        String nome = normalizarTexto(movimentacao.get("Nome"));
+        String tipoMovimentacao = normalizarTexto(movimentacao.get("NomeTipoMovimentacao"));
+        int tipoNumerico = movimentacao.get("TipoMovimentacao") instanceof Number numero ? numero.intValue() : 0;
+
+        if (!debito) {
+            if (contemAlgumaPalavra(categoria, KEYWORDS_FATURAMENTO) ||
+                    contemAlgumaPalavra(nome, KEYWORDS_FATURAMENTO) ||
+                    tipoNumerico == 1) {
+                return DfcGrupo.FATURAMENTO;
+            }
+            if (contemAlgumaPalavra(categoria, KEYWORDS_OUTRAS_ENTRADAS) || tipoNumerico == 15) {
+                return DfcGrupo.OUTRAS_ENTRADAS;
+            }
+            return DfcGrupo.RECEITA_OPERACIONAL;
+        }
+
+        if (contemAlgumaPalavra(categoria, KEYWORDS_INVESTIMENTOS) || contemAlgumaPalavra(nome, KEYWORDS_INVESTIMENTOS)) {
+            return DfcGrupo.INVESTIMENTO;
+        }
+        if (contemAlgumaPalavra(categoria, KEYWORDS_FINANCIAMENTO) ||
+                contemAlgumaPalavra(tipoMovimentacao, KEYWORDS_FINANCIAMENTO) ||
+                tipoNumerico == 16) {
+            return DfcGrupo.FINANCIAMENTO;
+        }
+        if (contemAlgumaPalavra(categoria, KEYWORDS_ESTRATEGIA) || contemAlgumaPalavra(nome, KEYWORDS_ESTRATEGIA)) {
+            return DfcGrupo.ATIVIDADE_ESTRATEGICA;
+        }
+        if (contemAlgumaPalavra(categoria, KEYWORDS_CUSTOS)) {
+            return DfcGrupo.CUSTO_OPERACIONAL;
+        }
+        return DfcGrupo.DESPESA_OPERACIONAL;
+    }
+
+    private String extrairNomeLinhaDfc(Map<String, Object> movimentacao) {
+        Object categoria = movimentacao.get("NomeCategoriaFinanceira");
+        if (categoria instanceof String cat && !cat.isBlank()) {
+            return cat.trim();
+        }
+        Object tipo = movimentacao.get("NomeTipoMovimentacao");
+        if (tipo instanceof String nomeTipo && !nomeTipo.isBlank()) {
+            return nomeTipo.trim();
+        }
+        Object nome = movimentacao.get("Nome");
+        if (nome instanceof String texto && !texto.isBlank()) {
+            return texto.trim();
+        }
+        boolean debito = converterParaBooleano(movimentacao.get("Debito"));
+        return debito ? "Despesa sem categoria" : "Receita sem categoria";
+    }
+
+    private String normalizarTexto(Object valor) {
+        if (valor == null) {
+            return "";
+        }
+        String texto = Normalizer.normalize(valor.toString().trim().toLowerCase(Locale.ROOT), Normalizer.Form.NFD);
+        return texto.replaceAll("[^\\p{ASCII}]", "");
+    }
+
+    private boolean contemAlgumaPalavra(String textoNormalizado, List<String> palavras) {
+        if (textoNormalizado == null || textoNormalizado.isBlank()) {
+            return false;
+        }
+        for (String palavra : palavras) {
+            if (textoNormalizado.contains(palavra)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean pareceTransferenciaInterna(Map<String, Object> movimentacao) {
+        String nome = normalizarTexto(movimentacao.get("Nome"));
+        String categoria = normalizarTexto(movimentacao.get("NomeCategoriaFinanceira"));
+        String tipo = normalizarTexto(movimentacao.get("NomeTipoMovimentacao"));
+
+        if (nome.contains("transfer") || categoria.contains("transfer") || tipo.contains("transfer")) {
+            return true;
+        }
+
+        Object tipoMovimentacao = movimentacao.get("TipoMovimentacao");
+        if (tipoMovimentacao instanceof Number numero) {
+            int codigo = numero.intValue();
+            if (codigo == 22 || codigo == 23) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private List<YearMonth> gerarIntervaloMensal(LocalDate inicio, LocalDate termino) {
+        List<YearMonth> meses = new ArrayList<>();
+        YearMonth atual = YearMonth.from(inicio);
+        YearMonth limite = YearMonth.from(termino);
+        while (!atual.isAfter(limite)) {
+            meses.add(atual);
+            atual = atual.plusMonths(1);
+        }
+        return meses;
+    }
+
+    private List<String> formatarMeses(List<YearMonth> intervalo) {
+        return intervalo.stream()
+                .map(ym -> MES_FORMATTER.format(ym.atDay(1)).toLowerCase(Locale.ROOT))
+                .collect(Collectors.toList());
+    }
+
+    private long extrairLong(Map<String, Object> mapa, String chave) {
+        if (mapa == null) {
+            return 0L;
+        }
+        Object valor = mapa.get(chave);
+        if (valor instanceof Number numero) {
+            return numero.longValue();
+        }
+        return 0L;
+    }
+
+    private static double arredondar(double valor) {
+        return Math.round(valor * 100.0) / 100.0;
+    }
+
+    private enum DfcGrupo {
+        FATURAMENTO("FATURAMENTO", "Faturamento"),
+        RECEITA_OPERACIONAL("RECEITA", "Receitas Operacionais"),
+        OUTRAS_ENTRADAS("RECEITA", "Outras Entradas"),
+        CUSTO_OPERACIONAL("DESPESA", "Custos Operacionais"),
+        DESPESA_OPERACIONAL("DESPESA", "Despesas Operacionais"),
+        ATIVIDADE_ESTRATEGICA("DESPESA", "Atividades Estrategicas"),
+        INVESTIMENTO("DESPESA", "Atividades de Investimento"),
+        FINANCIAMENTO("DESPESA", "Atividades de Financiamento"),
+        TRANSFERENCIA_INTERNA("IGNORAR", "Transferencias Internas");
+
+        private final String tipoLinha;
+        private final String rotulo;
+
+        DfcGrupo(String tipoLinha, String rotulo) {
+            this.tipoLinha = tipoLinha;
+            this.rotulo = rotulo;
+        }
+
+        boolean isReceita() {
+            return this == FATURAMENTO || "RECEITA".equals(tipoLinha);
+        }
+
+        boolean isDespesa() {
+            return "DESPESA".equals(tipoLinha);
+        }
+
+        String getTipoLinha() {
+            return tipoLinha;
+        }
+
+        String getRotulo() {
+            return rotulo;
+        }
+    }
+
+    private static class LinhaDfcAccumulator {
+        private final DfcGrupo grupo;
+        private final String nome;
+        private final String tipoLinha;
+        private final double[] valores;
+        private double total;
+
+        LinhaDfcAccumulator(DfcGrupo grupo, String nome, int quantidadeMeses) {
+            this.grupo = grupo;
+            this.nome = nome;
+            this.tipoLinha = grupo.getTipoLinha();
+            this.valores = new double[quantidadeMeses];
+        }
+
+        void adicionarValor(int indiceMes, double valor) {
+            valores[indiceMes] += valor;
+            total += valor;
+        }
+
+        double getTotal() {
+            return total;
+        }
+
+        DfcResponseDTO.Linha toDto() {
+            return DfcResponseDTO.Linha.builder()
+                    .nome(nome)
+                    .tipo(tipoLinha)
+                    .nivel(1)
+                    .grupo(grupo.getRotulo())
+                    .valores(converterArrayParaLista(valores))
+                    .total(total)
+                    .media(calcularMedia(valores))
+                    .build();
+        }
+    }
+
+    private boolean isLiquidado(Map<String, Object> movimentacao) {
+        if (movimentacao == null) {
+            return false;
+        }
+
+        Object dataQuitacao = movimentacao.get("DataQuitacao");
+        if (dataQuitacao instanceof String && !((String) dataQuitacao).isBlank()) {
+            return true;
+        }
+        if (dataQuitacao != null) {
+            return true;
+        }
+
+        Object dataConciliacao = movimentacao.get("DataConciliacao");
+        if (dataConciliacao instanceof String && !((String) dataConciliacao).isBlank()) {
+            return true;
+        }
+        if (dataConciliacao != null) {
+            return true;
+        }
+
+        Object pago = movimentacao.get("Pago");
+        if (pago != null && converterParaBooleano(pago)) {
+            return true;
+        }
+
+        Object quitado = movimentacao.get("Quitado");
+        return quitado != null && converterParaBooleano(quitado);
+    }
+
+    private double extrairValor(Object valorObj) {
+        if (valorObj instanceof Number number) {
+            return number.doubleValue();
+        }
+        if (valorObj instanceof String valorStr) {
+            try {
+                String normalizado = valorStr.trim();
+                if (normalizado.isEmpty()) {
+                    return 0;
+                }
+                if (normalizado.contains(",")) {
+                    normalizado = normalizado.replace(".", "").replace(",", ".");
+                }
+                return Double.parseDouble(normalizado);
+            } catch (NumberFormatException e) {
+                log.debug("Valor inválido recebido do Bom Controle: {}", valorStr);
+            }
+        }
+        return 0;
+    }
+
+    private boolean converterParaBooleano(Object valor) {
+        if (valor instanceof Boolean boolVal) {
+            return boolVal;
+        }
+        if (valor instanceof Number numberVal) {
+            return numberVal.intValue() != 0;
+        }
+        if (valor instanceof String texto) {
+            String normalizado = texto.trim().toLowerCase(Locale.ROOT);
+            if (normalizado.isEmpty()) {
+                return false;
+            }
+            return normalizado.equals("true") || normalizado.equals("1") || normalizado.equals("sim");
+        }
+        return false;
     }
 
     /**
@@ -1583,18 +2686,155 @@ public class BomControleService {
         );
     }
 
-    private Map<String, Object> criarRespostaMockDFC(String dataInicio, String dataTermino) {
-        return Map.of(
-                "dfc", List.of(
-                        Map.of("tipo", "Receita", "nome", "Vendas", "nivel", 1, "valor", 10000.0),
-                        Map.of("tipo", "Despesa", "nome", "Custos", "nivel", 1, "valor", 5000.0)
-                ),
-                "totalReceitas", 10000.0,
-                "totalDespesas", 5000.0,
-                "resultado", 5000.0,
-                "dataInicio", dataInicio != null ? dataInicio : "",
-                "dataTermino", dataTermino != null ? dataTermino : "",
-                "totalMovimentacoes", 10
-        );
-    }
+        private DfcResponseDTO criarRespostaMockDFC(String dataInicio, String dataTermino) {
+        LocalDate inicio = dataInicio != null && !dataInicio.isBlank()
+            ? LocalDate.parse(dataInicio)
+            : LocalDate.now().minusMonths(5).withDayOfMonth(1);
+        LocalDate termino = dataTermino != null && !dataTermino.isBlank()
+            ? LocalDate.parse(dataTermino)
+            : LocalDate.now();
+        List<YearMonth> intervalo = gerarIntervaloMensal(inicio, termino);
+        if (intervalo.isEmpty()) {
+            intervalo = List.of(YearMonth.from(inicio));
+        }
+        int meses = intervalo.size();
+        java.util.Random random = new java.util.Random();
+
+        double[] faturamento = gerarSerieAleatoria(meses, 80000, 140000, random);
+        double[] receitasOperacionais = gerarSerieAleatoria(meses, 90000, 180000, random);
+        double[] outrasEntradas = gerarSerieAleatoria(meses, 3000, 15000, random);
+        double[] custos = gerarSerieAleatoria(meses, 35000, 65000, random);
+        double[] despesasOperacionais = gerarSerieAleatoria(meses, 25000, 55000, random);
+        double[] estrategicas = gerarSerieAleatoria(meses, 8000, 20000, random);
+        double[] investimentos = gerarSerieAleatoria(meses, 5000, 15000, random);
+        double[] financiamentos = gerarSerieAleatoria(meses, 4000, 12000, random);
+
+        double[] receitasTotais = new double[meses];
+        double[] despesasTotais = new double[meses];
+        for (int i = 0; i < meses; i++) {
+            receitasTotais[i] = faturamento[i] + receitasOperacionais[i] + outrasEntradas[i];
+            despesasTotais[i] = custos[i] + despesasOperacionais[i] + estrategicas[i] + investimentos[i] + financiamentos[i];
+        }
+
+        List<DfcResponseDTO.Linha> linhas = new ArrayList<>();
+        linhas.add(criarLinhaSecao("FATURAMENTO (NOVOS CONTRATOS)", meses));
+        linhas.add(DfcResponseDTO.Linha.builder()
+            .nome("NFs Emitidas (Conforme Recebimento)")
+            .tipo("FATURAMENTO")
+            .nivel(1)
+            .valores(converterArrayParaLista(faturamento))
+            .total(Arrays.stream(faturamento).sum())
+            .media(calcularMedia(faturamento))
+            .build());
+
+        linhas.add(criarLinhaSecao("TOTAL RECEITAS", meses));
+        linhas.add(DfcResponseDTO.Linha.builder()
+            .nome("1. Receitas Operacionais")
+            .tipo("RECEITA")
+            .nivel(1)
+            .valores(converterArrayParaLista(receitasOperacionais))
+            .total(Arrays.stream(receitasOperacionais).sum())
+            .media(calcularMedia(receitasOperacionais))
+            .build());
+        linhas.add(DfcResponseDTO.Linha.builder()
+            .nome("2. Outras Entradas")
+            .tipo("RECEITA")
+            .nivel(1)
+            .valores(converterArrayParaLista(outrasEntradas))
+            .total(Arrays.stream(outrasEntradas).sum())
+            .media(calcularMedia(outrasEntradas))
+            .build());
+        linhas.add(criarSubtotalLinha("Subtotal Receitas", "SUBTOTAL_RECEITA", receitasTotais));
+
+        linhas.add(criarLinhaSecao("TOTAL DESPESAS", meses));
+        linhas.add(DfcResponseDTO.Linha.builder()
+            .nome("1. Custos Operacionais")
+            .tipo("DESPESA")
+            .nivel(1)
+            .valores(converterArrayParaLista(custos))
+            .total(Arrays.stream(custos).sum())
+            .media(calcularMedia(custos))
+            .build());
+        linhas.add(DfcResponseDTO.Linha.builder()
+            .nome("2. Despesas Operacionais")
+            .tipo("DESPESA")
+            .nivel(1)
+            .valores(converterArrayParaLista(despesasOperacionais))
+            .total(Arrays.stream(despesasOperacionais).sum())
+            .media(calcularMedia(despesasOperacionais))
+            .build());
+        linhas.add(DfcResponseDTO.Linha.builder()
+            .nome("3. Atividades Estratégicas")
+            .tipo("DESPESA")
+            .nivel(1)
+            .valores(converterArrayParaLista(estrategicas))
+            .total(Arrays.stream(estrategicas).sum())
+            .media(calcularMedia(estrategicas))
+            .build());
+        linhas.add(DfcResponseDTO.Linha.builder()
+            .nome("4. Atividades de Investimento")
+            .tipo("DESPESA")
+            .nivel(1)
+            .valores(converterArrayParaLista(investimentos))
+            .total(Arrays.stream(investimentos).sum())
+            .media(calcularMedia(investimentos))
+            .build());
+        linhas.add(DfcResponseDTO.Linha.builder()
+            .nome("5. Atividades de Financiamento")
+            .tipo("DESPESA")
+            .nivel(1)
+            .valores(converterArrayParaLista(financiamentos))
+            .total(Arrays.stream(financiamentos).sum())
+            .media(calcularMedia(financiamentos))
+            .build());
+        linhas.add(criarSubtotalLinha("Subtotal Despesas", "SUBTOTAL_DESPESA", despesasTotais));
+        linhas.add(criarResultadoLinha(receitasTotais, despesasTotais));
+
+        double totalReceitas = Arrays.stream(receitasTotais).sum();
+        double totalDespesas = Arrays.stream(despesasTotais).sum();
+
+        return DfcResponseDTO.builder()
+            .periodo(DfcResponseDTO.Periodo.builder()
+                .dataInicio(inicio.toString())
+                .dataTermino(termino.toString())
+                .build())
+            .meses(formatarMeses(intervalo))
+            .linhas(linhas)
+            .indicadores(DfcResponseDTO.Indicadores.builder()
+                .faturamentoNovosContratos(Arrays.stream(faturamento).sum())
+                .receitasOperacionais(Arrays.stream(receitasOperacionais).sum())
+                .outrasEntradas(Arrays.stream(outrasEntradas).sum())
+                .custosOperacionais(Arrays.stream(custos).sum())
+                .despesasOperacionais(Arrays.stream(despesasOperacionais).sum())
+                .atividadesEstrategicas(Arrays.stream(estrategicas).sum())
+                .investimentos(Arrays.stream(investimentos).sum())
+                .financiamentos(Arrays.stream(financiamentos).sum())
+                .totalReceitas(totalReceitas)
+                .totalDespesas(totalDespesas)
+                .resultado(totalReceitas - totalDespesas)
+                .margemPercentual(totalReceitas == 0 ? 0 : (totalReceitas - totalDespesas) / totalReceitas * 100d)
+                .ticketMedio((totalReceitas) / Math.max(1, meses))
+                .burnRateMensal(totalDespesas / meses)
+                .build())
+            .fonteDados("bom-controle/mock")
+            .fallbackAtivo(false)
+            .fallbackMetadata(Map.of())
+            .totalMovimentacoesProcessadas(0)
+            .totalMovimentacoesDisponiveis(0)
+            .paginasProcessadas(0)
+            .paginasEstimadas(0)
+            .tempoProcessamentoMs(0)
+            .usandoCache(false)
+            .atualizadoEm(LocalDateTime.now().toString())
+            .build();
+        }
+
+        private double[] gerarSerieAleatoria(int tamanho, int valorMinimo, int valorMaximo, java.util.Random random) {
+        double[] valores = new double[tamanho];
+        int amplitude = Math.max(1, valorMaximo - valorMinimo);
+        for (int i = 0; i < tamanho; i++) {
+            valores[i] = valorMinimo + random.nextInt(amplitude);
+        }
+        return valores;
+        }
 }

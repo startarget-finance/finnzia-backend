@@ -2023,6 +2023,8 @@ public class BomControleService {
 
         Map<String, LinhaDfcAccumulator> acumuladores = new LinkedHashMap<>();
         double[] receitasPorMes = new double[intervalo.size()];
+        double[] receitasOpPorMes = new double[intervalo.size()];
+        double[] outrasEntradasPorMes = new double[intervalo.size()];
         double[] despesasPorMes = new double[intervalo.size()];
         double totalReceitas = 0;
         double totalDespesas = 0;
@@ -2064,6 +2066,11 @@ public class BomControleService {
             if (grupo.isReceita()) {
                 totalReceitas += valor;
                 receitasPorMes[indiceMes] += valor;
+                if (grupo == DfcGrupo.OUTRAS_ENTRADAS) {
+                    outrasEntradasPorMes[indiceMes] += valor;
+                } else {
+                    receitasOpPorMes[indiceMes] += valor;
+                }
             } else if (grupo.isDespesa()) {
                 totalDespesas += valor;
                 despesasPorMes[indiceMes] += valor;
@@ -2076,6 +2083,8 @@ public class BomControleService {
                 acumuladores,
                 intervalo.size(),
                 receitasPorMes,
+                receitasOpPorMes,
+                outrasEntradasPorMes,
                 despesasPorMes);
 
         double resultado = totalReceitas - totalDespesas;
@@ -2125,17 +2134,22 @@ public class BomControleService {
             Map<String, LinhaDfcAccumulator> acumuladores,
             int quantidadeMeses,
             double[] receitasPorMes,
+            double[] receitasOpPorMes,
+            double[] outrasEntradasPorMes,
             double[] despesasPorMes) {
 
         List<DfcResponseDTO.Linha> linhas = new ArrayList<>();
+
+        // 1. Faturamento (Novos Contratos)
         linhas.add(criarLinhaSecao("FATURAMENTO (NOVOS CONTRATOS)", quantidadeMeses));
         adicionarLinhasPorGrupo(linhas, acumuladores, DfcGrupo.FATURAMENTO);
 
-        linhas.add(criarLinhaSecao("TOTAL RECEITAS", quantidadeMeses));
+        // 2. Receitas Operacionais
+        linhas.add(criarLinhaSecao("RECEITAS OPERACIONAIS", quantidadeMeses));
         adicionarLinhasPorGrupo(linhas, acumuladores, DfcGrupo.RECEITA_OPERACIONAL);
-        adicionarLinhasPorGrupo(linhas, acumuladores, DfcGrupo.OUTRAS_ENTRADAS);
-        linhas.add(criarSubtotalLinha("Subtotal Receitas", "SUBTOTAL_RECEITA", receitasPorMes));
+        linhas.add(criarSubtotalLinha("Subtotal Receitas Operacionais", "SUBTOTAL_RECEITA", receitasOpPorMes));
 
+        // 3. Despesas
         linhas.add(criarLinhaSecao("TOTAL DESPESAS", quantidadeMeses));
         adicionarLinhasPorGrupo(linhas, acumuladores, DfcGrupo.CUSTO_OPERACIONAL);
         adicionarLinhasPorGrupo(linhas, acumuladores, DfcGrupo.DESPESA_OPERACIONAL);
@@ -2144,6 +2158,12 @@ public class BomControleService {
         adicionarLinhasPorGrupo(linhas, acumuladores, DfcGrupo.FINANCIAMENTO);
         linhas.add(criarSubtotalLinha("Subtotal Despesas", "SUBTOTAL_DESPESA", despesasPorMes));
 
+        // 4. Receitas N\u00e3o Operacionais (ao final)
+        linhas.add(criarLinhaSecao("RECEITAS N\u00c3O OPERACIONAIS", quantidadeMeses));
+        adicionarLinhasPorGrupo(linhas, acumuladores, DfcGrupo.OUTRAS_ENTRADAS);
+        linhas.add(criarSubtotalLinha("Subtotal N\u00e3o Operacionais", "SUBTOTAL_RECEITA", outrasEntradasPorMes));
+
+        // 5. Resultado final (todas as receitas - despesas)
         linhas.add(criarResultadoLinha(receitasPorMes, despesasPorMes));
         return linhas;
     }

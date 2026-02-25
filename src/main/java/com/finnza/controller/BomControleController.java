@@ -191,13 +191,27 @@ public class BomControleController {
                 dataInicio, dataTermino, idsEmpresa, numeroDaPagina);
         
         try {
-            String dataInicioStr = dataInicio != null ? dataInicio.toString() : null;
-            String dataTerminoStr = dataTermino != null ? dataTermino.toString() : null;
-            
+            LocalDate dataInicioFinal  = dataInicio  != null ? dataInicio  : LocalDate.now().withDayOfMonth(1);
+            LocalDate dataTerminoFinal = dataTermino != null ? dataTermino : LocalDate.now().withDayOfMonth(LocalDate.now().lengthOfMonth());
+            String dataInicioStr  = dataInicioFinal.toString();
+            String dataTerminoStr = dataTerminoFinal.toString();
+
+            boolean temFiltroAvancado = (textoPesquisa != null && !textoPesquisa.isBlank())
+                    || idsCliente != null || idsFornecedor != null;
+
+            if (!temFiltroAvancado && idsEmpresa != null
+                    && syncService.periodoEstaSync(dataInicioFinal, dataTerminoFinal, idsEmpresa)) {
+                log.info("📦 Servindo contas a pagar do banco local — empresa={}", idsEmpresa);
+                Map<String, Object> resultado = syncService.buscarMovimentacoesDoDb(
+                        dataInicioFinal, dataTerminoFinal, tipoData, idsEmpresa,
+                        true, null, itensPorPagina, numeroDaPagina);
+                return ResponseEntity.ok(resultado);
+            }
+
+            log.info("🌐 Banco sem dados — buscando contas a pagar da API");
             Map<String, Object> resultado = bomControleService.listarContasPagar(
                     dataInicioStr, dataTerminoStr, tipoData, idsEmpresa, idsCliente, idsFornecedor,
                     textoPesquisa, categoria, itensPorPagina, numeroDaPagina);
-            
             return ResponseEntity.ok(resultado);
         } catch (Exception e) {
             log.error("Erro ao listar contas a pagar", e);
@@ -261,13 +275,27 @@ public class BomControleController {
                 dataInicio, dataTermino, idsEmpresa, numeroDaPagina);
         
         try {
-            String dataInicioStr = dataInicio != null ? dataInicio.toString() : null;
-            String dataTerminoStr = dataTermino != null ? dataTermino.toString() : null;
-            
+            LocalDate dataInicioFinal  = dataInicio  != null ? dataInicio  : LocalDate.now().withDayOfMonth(1);
+            LocalDate dataTerminoFinal = dataTermino != null ? dataTermino : LocalDate.now().withDayOfMonth(LocalDate.now().lengthOfMonth());
+            String dataInicioStr  = dataInicioFinal.toString();
+            String dataTerminoStr = dataTerminoFinal.toString();
+
+            boolean temFiltroAvancado = (textoPesquisa != null && !textoPesquisa.isBlank())
+                    || idsCliente != null || idsFornecedor != null;
+
+            if (!temFiltroAvancado && idsEmpresa != null
+                    && syncService.periodoEstaSync(dataInicioFinal, dataTerminoFinal, idsEmpresa)) {
+                log.info("📦 Servindo contas a receber do banco local — empresa={}", idsEmpresa);
+                Map<String, Object> resultado = syncService.buscarMovimentacoesDoDb(
+                        dataInicioFinal, dataTerminoFinal, tipoData, idsEmpresa,
+                        false, null, itensPorPagina, numeroDaPagina);
+                return ResponseEntity.ok(resultado);
+            }
+
+            log.info("🌐 Banco sem dados — buscando contas a receber da API");
             Map<String, Object> resultado = bomControleService.listarContasReceber(
                     dataInicioStr, dataTerminoStr, tipoData, idsEmpresa, idsCliente, idsFornecedor,
                     textoPesquisa, categoria, itensPorPagina, numeroDaPagina);
-            
             return ResponseEntity.ok(resultado);
         } catch (Exception e) {
             log.error("Erro ao listar contas a receber", e);
@@ -449,17 +477,20 @@ public class BomControleController {
         }
 
         try {
+            boolean temFiltroAvancado = (textoPesquisa != null && !textoPesquisa.isBlank())
+                    || idsCliente != null || idsFornecedor != null;
+
+            if (!temFiltroAvancado && idsEmpresa != null
+                    && syncService.periodoEstaSync(dataInicioFinal, dataTerminoFinal, idsEmpresa)) {
+                log.info("📦 Servindo resumo financeiro do banco local — empresa={}", idsEmpresa);
+                ResumoFinanceiroDTO resumo = syncService.gerarResumoDoDb(dataInicioFinal, dataTerminoFinal, idsEmpresa);
+                return ResponseEntity.ok(resumo);
+            }
+
+            log.info("🌐 Banco sem dados — buscando resumo financeiro da API");
             ResumoFinanceiroDTO resumo = bomControleService.gerarResumoFinanceiro(
-                    dataInicioFinal.toString(),
-                    dataTerminoFinal.toString(),
-                    tipoData,
-                    idsEmpresa,
-                    idsCliente,
-                    idsFornecedor,
-                    textoPesquisa,
-                    categoria,
-                    tipo
-            );
+                    dataInicioFinal.toString(), dataTerminoFinal.toString(),
+                    tipoData, idsEmpresa, idsCliente, idsFornecedor, textoPesquisa, categoria, tipo);
             return ResponseEntity.ok(resumo);
         } catch (IllegalArgumentException e) {
             log.warn("Parâmetros inválidos ao gerar resumo financeiro: {}", e.getMessage());
@@ -513,15 +544,35 @@ public class BomControleController {
         }
 
         try {
+            boolean temFiltroAvancado = (textoPesquisa != null && !textoPesquisa.isBlank())
+                    || idsCliente != null || idsFornecedor != null;
+
+            if (!temFiltroAvancado && idsEmpresa != null) {
+                LocalDate hoje      = LocalDate.now();
+                LocalDate inicioMes = hoje.withDayOfMonth(1);
+                LocalDate fimMes    = hoje.withDayOfMonth(hoje.lengthOfMonth());
+                LocalDate inicioAno = hoje.withDayOfYear(1);
+                LocalDate fimAno    = hoje.withDayOfYear(hoje.lengthOfYear());
+
+                boolean mesSync = syncService.periodoEstaSync(inicioMes, fimMes, idsEmpresa);
+                boolean anoSync = syncService.periodoEstaSync(inicioAno, fimAno, idsEmpresa);
+
+                if (mesSync || anoSync) {
+                    log.info("📦 Servindo resumo financeiro padrões do banco local — empresa={}", idsEmpresa);
+                    ResumoFinanceiroDTO mes = mesSync
+                            ? syncService.gerarResumoDoDb(inicioMes, fimMes, idsEmpresa)
+                            : bomControleService.gerarResumoFinanceiro(inicioMes.toString(), fimMes.toString(), tipoData, idsEmpresa, idsCliente, idsFornecedor, textoPesquisa, categoria, tipo);
+                    ResumoFinanceiroDTO ano = anoSync
+                            ? syncService.gerarResumoDoDb(inicioAno, fimAno, idsEmpresa)
+                            : bomControleService.gerarResumoFinanceiro(inicioAno.toString(), fimAno.toString(), tipoData, idsEmpresa, idsCliente, idsFornecedor, textoPesquisa, categoria, tipo);
+                    return ResponseEntity.ok(ResumoFinanceiroPeriodosDTO.builder()
+                            .mesAtual(mes).anoAtual(ano).build());
+                }
+            }
+
+            log.info("🌐 Banco sem dados — buscando resumo padrões da API");
             ResumoFinanceiroPeriodosDTO resposta = bomControleService.gerarResumoFinanceiroPeriodosPadrao(
-                    tipoData,
-                    idsEmpresa,
-                    idsCliente,
-                    idsFornecedor,
-                    textoPesquisa,
-                    categoria,
-                    tipo
-            );
+                    tipoData, idsEmpresa, idsCliente, idsFornecedor, textoPesquisa, categoria, tipo);
             return ResponseEntity.ok(resposta);
         } catch (Exception e) {
             log.error("Erro ao gerar resumo financeiro padrão", e);

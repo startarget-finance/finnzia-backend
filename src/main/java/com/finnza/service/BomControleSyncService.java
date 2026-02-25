@@ -5,6 +5,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.finnza.domain.entity.MovimentacaoFinanceira;
 import com.finnza.domain.entity.SyncStatus;
 import com.finnza.dto.response.DfcResponseDTO;
+import com.finnza.dto.response.ResumoFinanceiroDTO;
+import com.finnza.dto.response.ResumoFinanceiroPeriodosDTO;
 import com.finnza.repository.EmpresaUsuarioRepository;
 import com.finnza.repository.MovimentacaoFinanceiraRepository;
 import com.finnza.repository.SyncStatusRepository;
@@ -148,21 +150,25 @@ public class BomControleSyncService {
     @Scheduled(fixedDelay = 20 * 60 * 1000L, initialDelay = 35 * 60 * 1000L)
     public void jobSyncMesAtual() {
         LocalDate hoje = LocalDate.now();
-        String inicio = hoje.withDayOfMonth(1).toString();
-        String fim    = hoje.withDayOfMonth(hoje.lengthOfMonth()).toString();
         List<Integer> empresas = getEmpresasParaSync();
-        log.info("⏰ [JOB] sync mês atual ({} a {}) — {} empresa(s)", inicio, fim, empresas.size());
 
-        for (Integer idEmpresa : empresas) {
-            try {
-                log.info("⏰ [JOB] sync mês atual empresa={}", idEmpresa);
-                sincronizarPeriodo(inicio, fim, idEmpresa, false);
-                Thread.sleep(5_000);
-            } catch (InterruptedException ie) {
-                Thread.currentThread().interrupt();
-                break;
-            } catch (Exception e) {
-                log.error("❌ Erro no job syncMesAtual empresa={}", idEmpresa, e);
+        // Sincroniza mês atual + próximos 6 meses (para capturar pendentes futuros)
+        for (int offset = 0; offset <= 6; offset++) {
+            YearMonth ym = YearMonth.from(hoje).plusMonths(offset);
+            String inicio = ym.atDay(1).toString();
+            String fim    = ym.atEndOfMonth().toString();
+            log.info("⏰ [JOB] sync {} ({} a {}) — {} empresa(s)",
+                    offset == 0 ? "mês atual" : "mês +" + offset, inicio, fim, empresas.size());
+            for (Integer idEmpresa : empresas) {
+                try {
+                    sincronizarPeriodo(inicio, fim, idEmpresa, false);
+                    Thread.sleep(5_000);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    return;
+                } catch (Exception e) {
+                    log.error("❌ Erro no job syncMesAtual empresa={} periodo={}", idEmpresa, ym, e);
+                }
             }
         }
     }
@@ -235,6 +241,20 @@ public class BomControleSyncService {
                     log.error("❌ [AUTO-BOOTSTRAP] Erro ao sincronizar {} empresa={}: {}", ym, idEmpresa, e.getMessage());
                 }
             }
+            // Sincroniza também os próximos 6 meses para capturar pendentes futuros
+            for (int i = 1; i <= 6; i++) {
+                YearMonth ym = atual.plusMonths(i);
+                try {
+                    sincronizarPeriodo(ym.atDay(1).toString(), ym.atEndOfMonth().toString(), idEmpresa, false);
+                    sucesso++;
+                    Thread.sleep(delayBootstrapEntreMesesMs);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    break;
+                } catch (Exception e) {
+                    log.error("❌ [AUTO-BOOTSTRAP] Erro ao sincronizar futuro {} empresa={}: {}", ym, idEmpresa, e.getMessage());
+                }
+            }
             log.info("🏁 [AUTO-BOOTSTRAP] Concluído para empresa={} — {} períodos sincronizados", idEmpresa, sucesso);
         }, "auto-bootstrap-empresa-" + idEmpresa);
         t.setDaemon(true);
@@ -250,13 +270,14 @@ public class BomControleSyncService {
         List<Integer> empresas = getEmpresasParaSync();
         log.info("⏰ [JOB] syncMesesRecentes — {} empresa(s)", empresas.size());
         for (Integer idEmpresa : empresas) {
-            for (int i = 1; i <= 3; i++) {
-                YearMonth ym = YearMonth.from(hoje).minusMonths(i);
+            // 3 meses passados + mês atual + 6 meses futuros (cobre todos os pendentes)
+            for (int i = -3; i <= 6; i++) {
+                YearMonth ym = YearMonth.from(hoje).plusMonths(i);
                 String inicio = ym.atDay(1).toString();
                 String fim    = ym.atEndOfMonth().toString();
-                log.info("⏰ [JOB] sync mês {} empresa={}", ym, idEmpresa);
+                log.info("⏰ [JOB] syncMesesRecentes {} empresa={}", ym, idEmpresa);
                 try {
-                    sincronizarPeriodo(inicio, fim, idEmpresa, true);
+                    sincronizarPeriodo(inicio, fim, idEmpresa, i < 0);
                     Thread.sleep(8_000);
                 } catch (InterruptedException ie) {
                     Thread.currentThread().interrupt();
@@ -277,7 +298,7 @@ public class BomControleSyncService {
         List<Integer> empresas = getEmpresasParaSync();
         log.info("⏰ [JOB] syncHistorico — {} empresa(s)", empresas.size());
         for (Integer idEmpresa : empresas) {
-            for (int i = 4; i <= 12; i++) {
+            for (int i = 4; i <= 24; i++) {
                 YearMonth ym = YearMonth.from(hoje).minusMonths(i);
                 String key   = buildKey(ym.toString(), idEmpresa);
                 Optional<SyncStatus> statusOpt = syncStatusRepo.findByPeriodoEmpresaKey(key);
@@ -572,6 +593,64 @@ public class BomControleSyncService {
                 .fonteDados("banco-local")
                 .usandoCache(true)
                 .atualizadoEm(LocalDateTime.now().toString())
+                .build();
+    }
+
+    /**
+     * Gera ResumoFinanceiroDTO a partir dos dados do banco local.
+     */
+    public ResumoFinanceiroDTO gerarResumoDoDb(LocalDate dataInicio, LocalDate dataTermino, Integer idEmpresa) {
+        List<MovimentacaoFinanceira> all =
+                movimentacaoRepo.findAllByIdEmpresaAndDataVencimentoBetween(idEmpresa, dataInicio, dataTermino);
+
+        ResumoFinanceiroDTO.BlocoResumo blocoReceber = calcularBlocoResumo(
+                all.stream().filter(m -> Boolean.FALSE.equals(m.getDebito())).collect(Collectors.toList()));
+        ResumoFinanceiroDTO.BlocoResumo blocoPagar = calcularBlocoResumo(
+                all.stream().filter(m -> Boolean.TRUE.equals(m.getDebito())).collect(Collectors.toList()));
+
+        double saldoDisponivel = blocoReceber.getTotalLiquidado() - blocoPagar.getTotalLiquidado();
+        double saldoProjetado  = blocoReceber.getTotalGeral()     - blocoPagar.getTotalGeral();
+
+        log.info("📦 Resumo do banco: {} registros para empresa={} de {} a {}",
+                all.size(), idEmpresa, dataInicio, dataTermino);
+
+        return ResumoFinanceiroDTO.builder()
+                .periodo(ResumoFinanceiroDTO.PeriodoResumo.builder()
+                        .dataInicio(dataInicio.toString())
+                        .dataTermino(dataTermino.toString())
+                        .build())
+                .contasReceber(blocoReceber)
+                .contasPagar(blocoPagar)
+                .saldoDisponivel(saldoDisponivel)
+                .saldoProjetado(saldoProjetado)
+                .totalMovimentacoes(all.size())
+                .usandoCache(true)
+                .fonteDados("banco-local")
+                .atualizadoEm(LocalDateTime.now().toString())
+                .fallbackAtivo(false)
+                .build();
+    }
+
+    private ResumoFinanceiroDTO.BlocoResumo calcularBlocoResumo(List<MovimentacaoFinanceira> movs) {
+        double totalGeral = movs.stream()
+                .mapToDouble(m -> m.getValor() != null ? m.getValor().doubleValue() : 0.0)
+                .sum();
+        List<MovimentacaoFinanceira> pagos = movs.stream()
+                .filter(m -> "pago".equalsIgnoreCase(m.getStatusPagamento()))
+                .collect(Collectors.toList());
+        List<MovimentacaoFinanceira> pendentes = movs.stream()
+                .filter(m -> !"pago".equalsIgnoreCase(m.getStatusPagamento()))
+                .collect(Collectors.toList());
+        double totalLiquidado = pagos.stream()
+                .mapToDouble(m -> m.getValor() != null ? m.getValor().doubleValue() : 0.0).sum();
+        double totalPendente  = pendentes.stream()
+                .mapToDouble(m -> m.getValor() != null ? m.getValor().doubleValue() : 0.0).sum();
+        return ResumoFinanceiroDTO.BlocoResumo.builder()
+                .totalGeral(totalGeral)
+                .totalLiquidado(totalLiquidado)
+                .totalPendente(totalPendente)
+                .totalContas(movs.size())
+                .contasPendentes(pendentes.size())
                 .build();
     }
 

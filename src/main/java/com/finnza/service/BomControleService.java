@@ -2000,7 +2000,7 @@ public class BomControleService {
         return resultado;
     }
 
-    private DfcResponseDTO montarDfcResponse(
+    public DfcResponseDTO montarDfcResponse(
             List<Map<String, Object>> movimentacoes,
             LocalDate dataInicio,
             LocalDate dataTermino,

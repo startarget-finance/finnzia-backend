@@ -5,6 +5,7 @@ import com.finnza.dto.response.ResumoFinanceiroDTO;
 import com.finnza.dto.response.ResumoFinanceiroPeriodosDTO;
 import com.finnza.service.BomControleService;
 import com.finnza.service.BomControleRateLimiter;
+import com.finnza.service.BomControleSyncService;
 import com.finnza.service.UsuarioEmpresaService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -35,6 +36,9 @@ public class BomControleController {
 
     @Autowired
     private BomControleService bomControleService;
+
+    @Autowired
+    private BomControleSyncService syncService;
     
     @Autowired
     private BomControleRateLimiter rateLimiter;
@@ -347,11 +351,37 @@ public class BomControleController {
             
             String dataInicioStr = dataInicioFinal.toString();
             String dataTerminoStr = dataTerminoFinal.toString();
-            
+
+            // ── Tenta servir do banco local (evita rate limit) ──────────────
+            // Usa a API diretamente apenas se não houver dados sincronizados no banco
+            // ou se houver filtros de texto/cliente/fornecedor que requerem a API
+            boolean temFiltroAvancado = (textoPesquisa != null && !textoPesquisa.isBlank())
+                    || idsCliente != null || idsFornecedor != null;
+
+            if (!temFiltroAvancado && idsEmpresa != null
+                    && syncService.periodoEstaSync(dataInicioFinal, dataTerminoFinal, idsEmpresa)) {
+
+                log.info("📦 Servindo movimentações do banco local — empresa={} de {} a {}",
+                        idsEmpresa, dataInicioStr, dataTerminoStr);
+
+                Boolean debitoFiltro = null;
+                if ("despesa".equalsIgnoreCase(tipo))  debitoFiltro = true;
+                if ("receita".equalsIgnoreCase(tipo))  debitoFiltro = false;
+
+                Map<String, Object> resultado = syncService.buscarMovimentacoesDoDb(
+                        dataInicioFinal, dataTerminoFinal,
+                        tipoData, idsEmpresa,
+                        debitoFiltro, statusPagamento,
+                        itensPorPagina, numeroDaPagina);
+                return ResponseEntity.ok(resultado);
+            }
+
+            // ── Fallback: API do Bom Controle ─────────────────────────────
+            log.info("🌐 Banco sem dados para o período — buscando da API Bom Controle");
             Map<String, Object> resultado = bomControleService.buscarMovimentacoes(
                     dataInicioStr, dataTerminoStr, tipoData, idsEmpresa, idsCliente, idsFornecedor,
                     textoPesquisa, categoria, tipo, statusPagamento, itensPorPagina, numeroDaPagina);
-            
+
             return ResponseEntity.ok(resultado);
         } catch (IllegalArgumentException e) {
             log.warn("Parâmetros inválidos ao buscar movimentações: {}", e.getMessage());
@@ -568,6 +598,20 @@ public class BomControleController {
                 dataInicio, dataTermino, idsEmpresa, usarCache, forcarAtualizacao);
 
         try {
+            boolean forcarApi = Boolean.TRUE.equals(forcarAtualizacao);
+            final Integer empresaDFC = idsEmpresa;
+
+            // ── Tenta servir do banco local (evita rate limit) ────────────────
+            if (!forcarApi && empresaDFC != null
+                    && syncService.periodoEstaSync(dataInicio, dataTermino, empresaDFC)) {
+
+                log.info("📦 DFC servido do banco local — empresa={} de {} a {}", empresaDFC, dataInicio, dataTermino);
+                DfcResponseDTO resultado = syncService.gerarDFCDoDb(dataInicio, dataTermino, empresaDFC);
+                return ResponseEntity.ok(resultado);
+            }
+
+            // ── Fallback: API do Bom Controle ─────────────────────────────────
+            log.info("🌐 Banco sem dados DFC para o período — buscando da API Bom Controle");
             DfcResponseDTO resultado = bomControleService.gerarDFC(
                     dataInicio.toString(),
                     dataTermino.toString(),
@@ -615,18 +659,34 @@ public class BomControleController {
                 dataInicio, dataTermino, idEmpresa);
         
         try {
-            String dataInicioStr = dataInicio != null ? dataInicio.toString() : null;
-            String dataTerminoStr = dataTermino != null ? dataTermino.toString() : null;
-            
-            Map<String, Object> resultado = bomControleService.sincronizarPeriodo(
-                    dataInicioStr, dataTerminoStr, idEmpresa);
-            
-            return ResponseEntity.ok(resultado);
+            // Usa datas fornecidas ou mês atual como padrão
+            LocalDate inicio = dataInicio != null ? dataInicio : LocalDate.now().withDayOfMonth(1);
+            LocalDate fim    = dataTermino != null ? dataTermino : LocalDate.now().withDayOfMonth(LocalDate.now().lengthOfMonth());
+
+            // Executa em thread separada para não bloquear a resposta HTTP
+            final Integer empresaFinal = idEmpresa;
+            final String inicioStr = inicio.toString();
+            final String fimStr    = fim.toString();
+            new Thread(() -> {
+                try {
+                    syncService.sincronizarPeriodo(inicioStr, fimStr, empresaFinal, false);
+                } catch (Exception ex) {
+                    log.error("Erro no sync em background do período {} a {}", inicioStr, fimStr, ex);
+                }
+            }, "sync-periodo-" + idEmpresa).start();
+
+            return ResponseEntity.accepted().body(Map.of(
+                    "sucesso", true,
+                    "mensagem", "Sincronização iniciada em background",
+                    "dataInicio", inicioStr,
+                    "dataTermino", fimStr,
+                    "idEmpresa", idEmpresa
+            ));
         } catch (Exception e) {
-            log.error("Erro ao sincronizar período", e);
+            log.error("Erro ao iniciar sincronização do período", e);
             return ResponseEntity.status(500).body(Map.of(
                     "erro", true,
-                    "mensagem", "Erro ao sincronizar período: " + e.getMessage()
+                    "mensagem", "Erro ao iniciar sincronização: " + e.getMessage()
             ));
         }
     }
@@ -653,13 +713,25 @@ public class BomControleController {
         log.info("Sincronização incremental do Bom Controle: idEmpresa={}", idEmpresa);
         
         try {
-            Map<String, Object> resultado = bomControleService.sincronizarIncremental(idEmpresa);
-            return ResponseEntity.ok(resultado);
+            final Integer empresaFinal = idEmpresa;
+            new Thread(() -> {
+                try {
+                    syncService.sincronizarIncremental(empresaFinal);
+                } catch (Exception ex) {
+                    log.error("Erro no sync incremental em background empresa={}", empresaFinal, ex);
+                }
+            }, "sync-incremental-" + idEmpresa).start();
+
+            return ResponseEntity.accepted().body(Map.of(
+                    "sucesso", true,
+                    "mensagem", "Sincronização incremental iniciada em background",
+                    "idEmpresa", idEmpresa
+            ));
         } catch (Exception e) {
-            log.error("Erro ao sincronizar incremental", e);
+            log.error("Erro ao iniciar sincronização incremental", e);
             return ResponseEntity.status(500).body(Map.of(
                     "erro", true,
-                    "mensagem", "Erro ao sincronizar incremental: " + e.getMessage()
+                    "mensagem", "Erro ao iniciar sincronização incremental: " + e.getMessage()
             ));
         }
     }
@@ -690,21 +762,26 @@ public class BomControleController {
     }
     
     /**
-     * Status do cache - informações sobre movimentações armazenadas
+     * Status do banco local — períodos sincronizados, total de registros, etc.
      */
     @GetMapping("/cache/status")
     @PreAuthorize("hasPermission(null, 'MOVIMENTACOES')")
-    public ResponseEntity<Map<String, Object>> statusCache() {
-        log.info("Consultando status do cache do Bom Controle...");
-        
+    public ResponseEntity<Map<String, Object>> statusCache(
+            @RequestHeader(value = "X-Empresa-Id", required = false) String headerEmpresaId,
+            @RequestParam(required = false, defaultValue = "6") Integer idEmpresa) {
+
+        Integer empresaFinal = extrairEmpresaDoHeader(headerEmpresaId);
+        if (empresaFinal != null) idEmpresa = empresaFinal;
+
+        log.info("Consultando status do sync/banco local — empresa={}", idEmpresa);
         try {
-            Map<String, Object> resultado = bomControleService.statusCache();
+            Map<String, Object> resultado = syncService.statusSync(idEmpresa);
             return ResponseEntity.ok(resultado);
         } catch (Exception e) {
-            log.error("Erro ao consultar status do cache", e);
+            log.error("Erro ao consultar status do sync", e);
             return ResponseEntity.status(500).body(Map.of(
                     "erro", true,
-                    "mensagem", "Erro ao consultar status do cache: " + e.getMessage()
+                    "mensagem", "Erro ao consultar status: " + e.getMessage()
             ));
         }
     }

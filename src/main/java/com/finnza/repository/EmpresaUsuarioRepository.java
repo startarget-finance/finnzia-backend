@@ -109,4 +109,11 @@ public interface EmpresaUsuarioRepository extends JpaRepository<EmpresaUsuario, 
      */
     @Query("SELECT CASE WHEN COUNT(eu) > 0 THEN true ELSE false END FROM EmpresaUsuario eu WHERE eu.usuario.id = :usuarioId AND eu.ativo = true")
     boolean usuarioTemEmpresasAtivas(@Param("usuarioId") Long usuarioId);
+
+    /**
+     * Retorna todos os idEmpresa distintos que têm pelo menos um usuário ativo.
+     * Usado pelo sync automático para descobrir quais empresas precisam de dados.
+     */
+    @Query("SELECT DISTINCT eu.idEmpresa FROM EmpresaUsuario eu WHERE eu.ativo = true ORDER BY eu.idEmpresa ASC")
+    List<Integer> findAllActiveEmpresaIds();
 }

@@ -108,17 +108,8 @@ public class SecurityConfig {
         // Métodos HTTP permitidos
         configuration.setAllowedMethods(Arrays.asList("GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"));
         
-        // Headers permitidos na requisição
-        configuration.setAllowedHeaders(Arrays.asList(
-            "Authorization",
-            "Content-Type",
-            "X-Requested-With",
-            "Accept",
-            "Origin",
-            "X-Empresa-Id",
-            "Access-Control-Request-Method",
-            "Access-Control-Request-Headers"
-        ));
+        // Headers permitidos na requisição (preflight e requisições reais)
+        configuration.setAllowedHeaders(List.of("*"));
         
         // Headers expostos na resposta (importante para o frontend acessar)
         configuration.setExposedHeaders(Arrays.asList(

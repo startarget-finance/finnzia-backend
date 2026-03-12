@@ -204,7 +204,7 @@ public class BomControleController {
                 log.info("📦 Servindo contas a pagar do banco local — empresa={}", idsEmpresa);
                 Map<String, Object> resultado = syncService.buscarMovimentacoesDoDb(
                         dataInicioFinal, dataTerminoFinal, tipoData, idsEmpresa,
-                        true, null, itensPorPagina, numeroDaPagina);
+                        true, null, null, null, itensPorPagina, numeroDaPagina);
                 return ResponseEntity.ok(resultado);
             }
 
@@ -288,7 +288,7 @@ public class BomControleController {
                 log.info("📦 Servindo contas a receber do banco local — empresa={}", idsEmpresa);
                 Map<String, Object> resultado = syncService.buscarMovimentacoesDoDb(
                         dataInicioFinal, dataTerminoFinal, tipoData, idsEmpresa,
-                        false, null, itensPorPagina, numeroDaPagina);
+                        false, null, null, null, itensPorPagina, numeroDaPagina);
                 return ResponseEntity.ok(resultado);
             }
 
@@ -325,6 +325,8 @@ public class BomControleController {
             @RequestParam(required = false) String categoria,
             @RequestParam(required = false) String tipo,
             @RequestParam(required = false) String statusPagamento,
+            @RequestParam(required = false) String orderBy,
+            @RequestParam(required = false) String orderDirection,
             @RequestParam(required = false, defaultValue = "50") Integer itensPorPagina,
             @RequestParam(required = false, defaultValue = "1") Integer numeroDaPagina) {
         
@@ -396,10 +398,15 @@ public class BomControleController {
                 if ("despesa".equalsIgnoreCase(tipo))  debitoFiltro = true;
                 if ("receita".equalsIgnoreCase(tipo))  debitoFiltro = false;
 
+                // DB armazena "pago"/"pendente"; API/front usam "recebido"/"pendente" — normalizar para o DB
+                String statusParaDb = statusPagamento != null && statusPagamento.trim().equalsIgnoreCase("recebido")
+                        ? "pago" : statusPagamento;
+
                 Map<String, Object> resultado = syncService.buscarMovimentacoesDoDb(
                         dataInicioFinal, dataTerminoFinal,
                         tipoData, idsEmpresa,
-                        debitoFiltro, statusPagamento,
+                        debitoFiltro, statusParaDb,
+                        orderBy, orderDirection,
                         itensPorPagina, numeroDaPagina);
                 return ResponseEntity.ok(resultado);
             }
@@ -605,7 +612,7 @@ public class BomControleController {
         
         // Mesma lógica do buscarMovimentacoes, mas pode ter comportamento diferente no futuro
         return buscarMovimentacoes(headerEmpresaId, dataInicio, dataTermino, tipoData, idsEmpresa, idsCliente, idsFornecedor,
-                textoPesquisa, categoria, tipo, statusPagamento, itensPorPagina, numeroDaPagina);
+                textoPesquisa, categoria, tipo, statusPagamento, null, null, itensPorPagina, numeroDaPagina);
     }
 
     /**

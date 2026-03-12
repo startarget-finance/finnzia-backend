@@ -485,6 +485,8 @@ public class BomControleSyncService {
 
     /**
      * Busca movimentações do banco local no mesmo formato esperado pelo controller.
+     * orderBy: "data" | "valor" | "status" | "tipo" (campo da entidade: dataVencimento, valor, statusPagamento, debito)
+     * orderDirection: "asc" | "desc"
      */
     public Map<String, Object> buscarMovimentacoesDoDb(
             LocalDate dataInicio, LocalDate dataTermino,
@@ -492,10 +494,24 @@ public class BomControleSyncService {
             Integer idEmpresa,
             Boolean debito,           // null = todos; true = despesas; false = receitas
             String statusPagamento,   // null | "pendente" | "pago"
+            String orderBy,          // null = data; "data" | "valor" | "status" | "tipo"
+            String orderDirection,   // null = desc; "asc" | "desc"
             int itensPorPagina,
             int numeroDaPagina) {
 
-        Sort sort = Sort.by(Sort.Direction.DESC, "dataVencimento");
+        String sortField = "dataVencimento";
+        if (orderBy != null && !orderBy.isBlank()) {
+            switch (orderBy.trim().toLowerCase()) {
+                case "valor" -> sortField = "valor";
+                case "status" -> sortField = "statusPagamento";
+                case "tipo" -> sortField = "debito";
+                case "data" -> sortField = "dataVencimento";
+                default -> { }
+            }
+        }
+        Sort.Direction direction = "asc".equalsIgnoreCase(orderDirection != null ? orderDirection.trim() : "") 
+                ? Sort.Direction.ASC : Sort.Direction.DESC;
+        Sort sort = Sort.by(direction, sortField);
         PageRequest pageable = PageRequest.of(numeroDaPagina - 1, itensPorPagina, sort);
 
         Page<MovimentacaoFinanceira> page;

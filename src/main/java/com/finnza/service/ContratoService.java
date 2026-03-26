@@ -1,5 +1,6 @@
 package com.finnza.service;
 
+import com.finnza.config.EmpresaContextHolder;
 import com.finnza.domain.entity.Cliente;
 import com.finnza.domain.entity.Contrato;
 import com.finnza.domain.entity.Cobranca;
@@ -50,7 +51,7 @@ public class ContratoService {
         // Buscar ou criar cliente
         Cliente cliente = buscarOuCriarCliente(request.getDadosCliente());
 
-        // Criar contrato
+        // Criar contrato (vinculado à empresa do contexto)
         Contrato contrato = Contrato.builder()
                 .titulo(request.getTitulo())
                 .descricao(request.getDescricao())
@@ -71,6 +72,7 @@ public class ContratoService {
                 .statusAssinatura(request.getStatusAssinatura())
                 .projeto(request.getProjeto())
                 .valorEntrada(request.getValorEntrada())
+                .idEmpresa(EmpresaContextHolder.getIdEmpresa())
                 .build();
 
         contrato = contratoRepository.save(contrato);
@@ -91,13 +93,16 @@ public class ContratoService {
     }
 
     /**
-     * Lista contratos com paginação
+     * Lista contratos com paginação (apenas da empresa do contexto X-Empresa-Id).
      */
     @Transactional
     public Page<ContratoDTO> listarTodos(Pageable pageable) {
-        return contratoRepository.findAllNaoDeletados(pageable)
+        Integer idEmpresa = EmpresaContextHolder.getIdEmpresa();
+        if (idEmpresa == null) {
+            return Page.empty(pageable);
+        }
+        return contratoRepository.findAllNaoDeletadosPorEmpresa(idEmpresa, pageable)
                 .map(contrato -> {
-                    // Recalcular status automaticamente antes de retornar
                     recalcularEAtualizarStatus(contrato);
                     return toDTO(contrato);
                 });
@@ -116,18 +121,25 @@ public class ContratoService {
             throw new RuntimeException("Contrato não encontrado");
         }
 
-        // Sincronizar com Asaas ao buscar um contrato específico (apenas um contrato, não causa rate limit)
+        Integer idEmpresa = EmpresaContextHolder.getIdEmpresa();
+        if (idEmpresa != null && contrato.getIdEmpresa() != null && !idEmpresa.equals(contrato.getIdEmpresa())) {
+            throw new RuntimeException("Contrato não encontrado");
+        }
+
         recalcularEAtualizarStatus(contrato, true);
-        
         return toDTO(contrato);
     }
 
     /**
-     * Busca contratos por cliente
+     * Busca contratos por cliente (apenas da empresa do contexto).
      */
     @Transactional
     public Page<ContratoDTO> buscarPorCliente(Long clienteId, Pageable pageable) {
-        return contratoRepository.findByClienteId(clienteId, pageable)
+        Integer idEmpresa = EmpresaContextHolder.getIdEmpresa();
+        if (idEmpresa == null) {
+            return Page.empty(pageable);
+        }
+        return contratoRepository.findByClienteIdAndEmpresa(clienteId, idEmpresa, pageable)
                 .map(contrato -> {
                     recalcularEAtualizarStatus(contrato);
                     return toDTO(contrato);
@@ -135,11 +147,15 @@ public class ContratoService {
     }
 
     /**
-     * Busca contratos por status
+     * Busca contratos por status (apenas da empresa do contexto).
      */
     @Transactional
     public Page<ContratoDTO> buscarPorStatus(Contrato.StatusContrato status, Pageable pageable) {
-        return contratoRepository.findByStatus(status, pageable)
+        Integer idEmpresa = EmpresaContextHolder.getIdEmpresa();
+        if (idEmpresa == null) {
+            return Page.empty(pageable);
+        }
+        return contratoRepository.findByStatusAndEmpresa(status, idEmpresa, pageable)
                 .map(contrato -> {
                     recalcularEAtualizarStatus(contrato);
                     return toDTO(contrato);
@@ -161,10 +177,13 @@ public class ContratoService {
             String paymentDateLe,
             Pageable pageable) {
         
-        // Normalizar termo
+        Integer idEmpresa = EmpresaContextHolder.getIdEmpresa();
+        if (idEmpresa == null) {
+            return Page.empty(pageable);
+        }
+
         String termoNormalizado = (termo != null && !termo.trim().isEmpty()) ? termo.trim() : null;
         
-        // Verificar se há filtros complexos que requerem busca completa
         boolean temFiltrosComplexos = (status != null && !status.trim().isEmpty() && !status.equals("todos")) ||
                                       (billingType != null && !billingType.trim().isEmpty() && !billingType.equals("todos")) ||
                                       (dueDateGe != null && !dueDateGe.trim().isEmpty()) ||
@@ -172,20 +191,18 @@ public class ContratoService {
                                       (paymentDateGe != null && !paymentDateGe.trim().isEmpty()) ||
                                       (paymentDateLe != null && !paymentDateLe.trim().isEmpty());
         
-        // Se não há filtros complexos, retornar diretamente a página do banco
         if (!temFiltrosComplexos) {
-            Page<Contrato> contratosPage = contratoRepository.buscarComFiltros(clienteId, termoNormalizado, pageable);
+            Page<Contrato> contratosPage = contratoRepository.buscarComFiltrosPorEmpresa(clienteId, termoNormalizado, idEmpresa, pageable);
             return contratosPage.map(contrato -> {
                 recalcularEAtualizarStatus(contrato, false);
                 return toDTO(contrato);
             });
         }
         
-        // Se há filtros complexos, buscar TODOS os contratos (sem paginação) para filtrar corretamente
-        // Preservar o sort do pageable original
-        Page<Contrato> todasPaginas = contratoRepository.buscarComFiltros(
+        Page<Contrato> todasPaginas = contratoRepository.buscarComFiltrosPorEmpresa(
             clienteId, 
             termoNormalizado, 
+            idEmpresa,
             org.springframework.data.domain.PageRequest.of(0, Integer.MAX_VALUE, pageable.getSort())
         );
         List<Contrato> todosContratos = todasPaginas.getContent();
@@ -367,7 +384,10 @@ public class ContratoService {
     public void removerContrato(Long id) {
         Contrato contrato = contratoRepository.findById(id)
                 .orElseThrow(() -> new RuntimeException("Contrato não encontrado"));
-
+        Integer idEmpresa = EmpresaContextHolder.getIdEmpresa();
+        if (idEmpresa != null && contrato.getIdEmpresa() != null && !idEmpresa.equals(contrato.getIdEmpresa())) {
+            throw new RuntimeException("Contrato não encontrado");
+        }
         contrato.softDelete();
         contratoRepository.save(contrato);
     }
@@ -380,6 +400,10 @@ public class ContratoService {
     public ContratoDTO sincronizarStatusComAsaas(Long id) {
         Contrato contrato = contratoRepository.findById(id)
                 .orElseThrow(() -> new RuntimeException("Contrato não encontrado"));
+        Integer idEmpresa = EmpresaContextHolder.getIdEmpresa();
+        if (idEmpresa != null && contrato.getIdEmpresa() != null && !idEmpresa.equals(contrato.getIdEmpresa())) {
+            throw new RuntimeException("Contrato não encontrado");
+        }
 
         if (contrato.getDeleted()) {
             throw new RuntimeException("Contrato não encontrado");
@@ -953,8 +977,20 @@ public class ContratoService {
      */
     @Transactional(readOnly = true)
     public Map<String, Object> getTotaisPorCategoria() {
-        // Buscar todos os contratos não deletados (sem paginação)
-        List<Contrato> todosContratos = contratoRepository.findAllNaoDeletados();
+        Integer idEmpresa = EmpresaContextHolder.getIdEmpresa();
+        if (idEmpresa == null) {
+            Map<String, Object> vazio = new java.util.HashMap<>();
+            vazio.put("totalContratos", 0L);
+            vazio.put("totalValor", BigDecimal.ZERO);
+            vazio.put("emDia", 0L);
+            vazio.put("emAtraso", 0L);
+            vazio.put("inadimplente", 0L);
+            vazio.put("valorEmDia", BigDecimal.ZERO);
+            vazio.put("valorEmAtraso", BigDecimal.ZERO);
+            vazio.put("valorInadimplente", BigDecimal.ZERO);
+            return vazio;
+        }
+        List<Contrato> todosContratos = contratoRepository.findAllNaoDeletadosPorEmpresa(idEmpresa);
         
         long totalContratos = todosContratos.size();
         BigDecimal totalValor = todosContratos.stream()
@@ -1012,9 +1048,17 @@ public class ContratoService {
      */
     @Transactional
     public Map<String, Object> sincronizarTodosComAsaas() {
-        log.info("=== INICIANDO SINCRONIZAÇÃO TOTAL COM ASAAS ===");
-        
-        List<Contrato> todosContratos = contratoRepository.findAllNaoDeletados();
+        Integer idEmpresa = EmpresaContextHolder.getIdEmpresa();
+        if (idEmpresa == null) {
+            Map<String, Object> vazio = new java.util.HashMap<>();
+            vazio.put("totalContratos", 0);
+            vazio.put("contratosAtualizados", 0);
+            vazio.put("cobrancasAtualizadas", 0);
+            vazio.put("erros", 0);
+            return vazio;
+        }
+        log.info("=== INICIANDO SINCRONIZAÇÃO COM ASAAS (empresa {}) ===", idEmpresa);
+        List<Contrato> todosContratos = contratoRepository.findAllNaoDeletadosPorEmpresa(idEmpresa);
         int totalContratos = todosContratos.size();
         int contratosAtualizados = 0;
         int cobrancasAtualizadas = 0;
@@ -1372,6 +1416,7 @@ public class ContratoService {
                     .status(Contrato.StatusContrato.PENDENTE)
                     .tipoPagamento(Contrato.TipoPagamento.RECORRENTE)
                     .asaasSubscriptionId(subscriptionId)
+                    .idEmpresa(EmpresaContextHolder.getIdEmpresa())
                     .build();
 
             contrato = contratoRepository.save(contrato);
@@ -1500,6 +1545,7 @@ public class ContratoService {
                     .dataVencimento(dataVencimento != null ? dataVencimento : LocalDate.now().plusDays(30))
                     .status(Contrato.StatusContrato.PENDENTE)
                     .tipoPagamento(Contrato.TipoPagamento.UNICO)
+                    .idEmpresa(EmpresaContextHolder.getIdEmpresa())
                     .build();
 
             contrato = contratoRepository.save(contrato);

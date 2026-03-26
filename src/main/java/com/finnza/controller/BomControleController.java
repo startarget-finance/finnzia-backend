@@ -6,6 +6,7 @@ import com.finnza.dto.response.ResumoFinanceiroPeriodosDTO;
 import com.finnza.service.BomControleService;
 import com.finnza.service.BomControleRateLimiter;
 import com.finnza.service.BomControleSyncService;
+import com.finnza.service.DashboardKpiService;
 import com.finnza.service.UsuarioEmpresaService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -45,6 +46,9 @@ public class BomControleController {
 
     @Autowired
     private UsuarioEmpresaService usuarioEmpresaService;
+
+    @Autowired
+    private DashboardKpiService dashboardKpiService;
 
     /**
      * Extrai o ID da empresa do header X-Empresa-Id
@@ -325,8 +329,6 @@ public class BomControleController {
             @RequestParam(required = false) String categoria,
             @RequestParam(required = false) String tipo,
             @RequestParam(required = false) String statusPagamento,
-            @RequestParam(required = false) String orderBy,
-            @RequestParam(required = false) String orderDirection,
             @RequestParam(required = false, defaultValue = "50") Integer itensPorPagina,
             @RequestParam(required = false, defaultValue = "1") Integer numeroDaPagina) {
         
@@ -398,15 +400,10 @@ public class BomControleController {
                 if ("despesa".equalsIgnoreCase(tipo))  debitoFiltro = true;
                 if ("receita".equalsIgnoreCase(tipo))  debitoFiltro = false;
 
-                // DB armazena "pago"/"pendente"; API/front usam "recebido"/"pendente" — normalizar para o DB
-                String statusParaDb = statusPagamento != null && statusPagamento.trim().equalsIgnoreCase("recebido")
-                        ? "pago" : statusPagamento;
-
                 Map<String, Object> resultado = syncService.buscarMovimentacoesDoDb(
                         dataInicioFinal, dataTerminoFinal,
                         tipoData, idsEmpresa,
-                        debitoFiltro, statusParaDb,
-                        orderBy, orderDirection,
+                        debitoFiltro, statusPagamento, null, null,
                         itensPorPagina, numeroDaPagina);
                 return ResponseEntity.ok(resultado);
             }
@@ -491,6 +488,8 @@ public class BomControleController {
                     && syncService.periodoEstaSync(dataInicioFinal, dataTerminoFinal, idsEmpresa)) {
                 log.info("📦 Servindo resumo financeiro do banco local — empresa={}", idsEmpresa);
                 ResumoFinanceiroDTO resumo = syncService.gerarResumoDoDb(dataInicioFinal, dataTerminoFinal, idsEmpresa);
+
+                dashboardKpiService.preencherKPIs(resumo, dataInicioFinal, dataTerminoFinal, idsEmpresa);
                 return ResponseEntity.ok(resumo);
             }
 
@@ -498,6 +497,8 @@ public class BomControleController {
             ResumoFinanceiroDTO resumo = bomControleService.gerarResumoFinanceiro(
                     dataInicioFinal.toString(), dataTerminoFinal.toString(),
                     tipoData, idsEmpresa, idsCliente, idsFornecedor, textoPesquisa, categoria, tipo);
+
+            dashboardKpiService.preencherKPIs(resumo, dataInicioFinal, dataTerminoFinal, idsEmpresa);
             return ResponseEntity.ok(resumo);
         } catch (IllegalArgumentException e) {
             log.warn("Parâmetros inválidos ao gerar resumo financeiro: {}", e.getMessage());
@@ -612,7 +613,7 @@ public class BomControleController {
         
         // Mesma lógica do buscarMovimentacoes, mas pode ter comportamento diferente no futuro
         return buscarMovimentacoes(headerEmpresaId, dataInicio, dataTermino, tipoData, idsEmpresa, idsCliente, idsFornecedor,
-                textoPesquisa, categoria, tipo, statusPagamento, null, null, itensPorPagina, numeroDaPagina);
+                textoPesquisa, categoria, tipo, statusPagamento, itensPorPagina, numeroDaPagina);
     }
 
     /**

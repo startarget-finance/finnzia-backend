@@ -19,10 +19,16 @@ import java.util.Optional;
 public interface ContratoRepository extends JpaRepository<Contrato, Long> {
 
     /**
-     * Lista contratos não deletados com paginação
+     * Lista contratos não deletados com paginação (todos, sem filtro de empresa)
      */
     @Query("SELECT c FROM Contrato c WHERE c.deleted = false")
     Page<Contrato> findAllNaoDeletados(Pageable pageable);
+
+    /**
+     * Lista contratos não deletados da empresa com paginação
+     */
+    @Query("SELECT c FROM Contrato c WHERE c.deleted = false AND (c.idEmpresa = :idEmpresa OR (c.idEmpresa IS NULL AND :idEmpresa IS NULL))")
+    Page<Contrato> findAllNaoDeletadosPorEmpresa(@Param("idEmpresa") Integer idEmpresa, Pageable pageable);
     
     /**
      * Lista todos os contratos não deletados (sem paginação)
@@ -31,16 +37,34 @@ public interface ContratoRepository extends JpaRepository<Contrato, Long> {
     List<Contrato> findAllNaoDeletados();
 
     /**
+     * Lista todos os contratos não deletados da empresa (sem paginação)
+     */
+    @Query("SELECT c FROM Contrato c WHERE c.deleted = false AND (c.idEmpresa = :idEmpresa OR (c.idEmpresa IS NULL AND :idEmpresa IS NULL))")
+    List<Contrato> findAllNaoDeletadosPorEmpresa(@Param("idEmpresa") Integer idEmpresa);
+
+    /**
      * Busca contratos por cliente (não deletados)
      */
     @Query("SELECT c FROM Contrato c WHERE c.cliente.id = :clienteId AND c.deleted = false")
     Page<Contrato> findByClienteId(@Param("clienteId") Long clienteId, Pageable pageable);
 
     /**
+     * Busca contratos por cliente e empresa (não deletados)
+     */
+    @Query("SELECT c FROM Contrato c WHERE c.cliente.id = :clienteId AND c.deleted = false AND (c.idEmpresa = :idEmpresa OR (c.idEmpresa IS NULL AND :idEmpresa IS NULL))")
+    Page<Contrato> findByClienteIdAndEmpresa(@Param("clienteId") Long clienteId, @Param("idEmpresa") Integer idEmpresa, Pageable pageable);
+
+    /**
      * Busca contratos por status (não deletados)
      */
     @Query("SELECT c FROM Contrato c WHERE c.status = :status AND c.deleted = false")
     Page<Contrato> findByStatus(@Param("status") Contrato.StatusContrato status, Pageable pageable);
+
+    /**
+     * Busca contratos por status e empresa (não deletados)
+     */
+    @Query("SELECT c FROM Contrato c WHERE c.status = :status AND c.deleted = false AND (c.idEmpresa = :idEmpresa OR (c.idEmpresa IS NULL AND :idEmpresa IS NULL))")
+    Page<Contrato> findByStatusAndEmpresa(@Param("status") Contrato.StatusContrato status, @Param("idEmpresa") Integer idEmpresa, Pageable pageable);
 
     /**
      * Busca contratos vencidos
@@ -67,6 +91,22 @@ public interface ContratoRepository extends JpaRepository<Contrato, Long> {
     Page<Contrato> buscarComFiltros(
             @Param("clienteId") Long clienteId,
             @Param("termo") String termo,
+            Pageable pageable);
+
+    /**
+     * Busca contratos com filtros e por empresa
+     */
+    @Query("SELECT c FROM Contrato c JOIN c.cliente cl WHERE " +
+           "(:clienteId IS NULL OR c.cliente.id = :clienteId) AND " +
+           "(:termo IS NULL OR :termo = '' OR " +
+           "LOWER(c.titulo) LIKE LOWER(CONCAT('%', :termo, '%')) OR " +
+           "LOWER(cl.razaoSocial) LIKE LOWER(CONCAT('%', :termo, '%')) OR " +
+           "(cl.nomeFantasia IS NOT NULL AND LOWER(cl.nomeFantasia) LIKE LOWER(CONCAT('%', :termo, '%')))) AND " +
+           "c.deleted = false AND (c.idEmpresa = :idEmpresa OR (c.idEmpresa IS NULL AND :idEmpresa IS NULL))")
+    Page<Contrato> buscarComFiltrosPorEmpresa(
+            @Param("clienteId") Long clienteId,
+            @Param("termo") String termo,
+            @Param("idEmpresa") Integer idEmpresa,
             Pageable pageable);
 }
 

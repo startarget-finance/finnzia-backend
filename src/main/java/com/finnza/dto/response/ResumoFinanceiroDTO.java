@@ -30,6 +30,44 @@ public class ResumoFinanceiroDTO {
     private boolean fallbackAtivo;
     private Map<String, Object> fallbackMetadata;
 
+    // =========================
+    // KPIs para o dashboard
+    // =========================
+    /**
+     * Média mensal de faturamento de novos contratos nos últimos 3 meses.
+     */
+    private Double mediaNovosContratosReais3m;
+
+    /**
+     * Média mensal de quantidade de novos contratos nos últimos 3 meses.
+     */
+    private Double mediaNovosContratosUnidades3m;
+
+    /**
+     * Custo financeiro + investimentos no período selecionado (consolidado).
+     */
+    private Double custoFinanceiroInvestimento;
+
+    /**
+     * Médias mensais nos últimos 6 meses.
+     */
+    private Double mediaCustoFixo;
+    private Double mediaCustoVariavel;
+    private Double mediaCustoEstrategico;
+
+    /**
+     * KPIs de contratos/clientes.
+     */
+    private Double totalClientesAtivos;
+    private Double churnPercent;
+    private Double ltvMeses;
+
+    /**
+     * Inadimplência no contexto do período (referência = dataTermino).
+     */
+    private Double inadimplenciaValor;
+    private Double inadimplenciaTaxa;
+
     @Data
     @Builder
     @NoArgsConstructor

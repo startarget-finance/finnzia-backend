@@ -27,7 +27,8 @@ import java.util.List;
            @Index(name = "idx_contrato_status", columnList = "status"),
            @Index(name = "idx_contrato_data_vencimento", columnList = "dataVencimento"),
            @Index(name = "idx_contrato_deleted", columnList = "deleted"),
-           @Index(name = "idx_contrato_cliente_status", columnList = "cliente_id,status")
+           @Index(name = "idx_contrato_cliente_status", columnList = "cliente_id,status"),
+           @Index(name = "idx_contrato_id_empresa", columnList = "id_empresa")
        })
 @EntityListeners(AuditingEntityListener.class)
 @Data
@@ -107,6 +108,10 @@ public class Contrato {
 
     @Column(name = "valor_entrada", precision = 15, scale = 2)
     private BigDecimal valorEntrada;
+
+    /** Empresa (Bom Controle) a que este contrato pertence; usado para filtrar por conta. */
+    @Column(name = "id_empresa")
+    private Integer idEmpresa;
 
     @OneToMany(mappedBy = "contrato", cascade = CascadeType.ALL, orphanRemoval = true, fetch = FetchType.LAZY)
     @Builder.Default

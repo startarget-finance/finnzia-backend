@@ -1,6 +1,8 @@
 package com.finnza.service;
 
+import com.finnza.config.EmpresaContextHolder;
 import com.finnza.domain.entity.Cliente;
+import com.finnza.repository.EmpresaConfigRepository;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpHeaders;
@@ -16,25 +18,25 @@ import java.util.Map;
 import java.util.UUID;
 
 /**
- * Service para integração com API do Asaas
- * Suporta modo mock para desenvolvimento sem conta Asaas
+ * Service para integração com API do Asaas.
+ * Usa apenas chave por empresa (empresa_config). Não há chave global.
  */
 @Slf4j
 @Service
 public class AsaasService {
 
     private final WebClient webClient;
-    private final String apiKey;
     private final String baseUrl;
     private final boolean mockEnabled;
+    private final EmpresaConfigRepository empresaConfigRepository;
 
     public AsaasService(
-            @Value("${asaas.api.key:}") String apiKey,
             @Value("${asaas.api.url:https://sandbox.asaas.com/api/v3}") String baseUrl,
-            @Value("${asaas.mock.enabled:true}") boolean mockEnabled) {
-        this.apiKey = apiKey;
+            @Value("${asaas.mock.enabled:true}") boolean mockEnabled,
+            EmpresaConfigRepository empresaConfigRepository) {
         this.baseUrl = baseUrl;
-        this.mockEnabled = mockEnabled || apiKey == null || apiKey.isEmpty();
+        this.mockEnabled = mockEnabled;
+        this.empresaConfigRepository = empresaConfigRepository;
 
         this.webClient = WebClient.builder()
                 .baseUrl(baseUrl)
@@ -42,18 +44,31 @@ public class AsaasService {
                 .defaultHeader(HttpHeaders.ACCEPT, MediaType.APPLICATION_JSON_VALUE)
                 .build();
 
-        if (this.mockEnabled) {
-            log.info("AsaasService iniciado em modo MOCK - API real desabilitada");
-        } else {
-            log.info("AsaasService iniciado - Conectando ao Asaas: {}", baseUrl);
-        }
+        log.info("AsaasService iniciado - chave apenas por empresa (empresa_config). Base: {}", baseUrl);
+    }
+
+    /**
+     * Retorna a API key da empresa (quando X-Empresa-Id e config existem). Sem fallback global.
+     */
+    private String getEffectiveApiKey() {
+        Integer idEmpresa = EmpresaContextHolder.getIdEmpresa();
+        if (idEmpresa == null) return null;
+        return empresaConfigRepository.findByIdEmpresa(idEmpresa)
+                .map(c -> c.getAsaasApiKey())
+                .filter(k -> k != null && !k.isBlank())
+                .orElse(null);
+    }
+
+    /** True se não houver chave da empresa ou mock global estiver ativo. */
+    private boolean isMockRequest() {
+        return mockEnabled || getEffectiveApiKey() == null || getEffectiveApiKey().isBlank();
     }
 
     /**
      * Busca cliente no Asaas por CPF/CNPJ
      */
     public String buscarClientePorCpfCnpj(String cpfCnpj) {
-        if (mockEnabled) {
+        if (isMockRequest()) {
             return null;
         }
 
@@ -64,7 +79,7 @@ public class AsaasService {
                             .path("/customers")
                             .queryParam("cpfCnpj", cpfCnpj)
                             .build())
-                    .header("access_token", apiKey)
+                    .header("access_token", getEffectiveApiKey())
                     .retrieve()
                     .bodyToMono(Map.class)
                     .block();
@@ -89,7 +104,7 @@ public class AsaasService {
      * Cria um cliente no Asaas
      */
     public String criarCliente(Cliente cliente) {
-        if (mockEnabled) {
+        if (isMockRequest()) {
             return criarClienteMock(cliente);
         }
 
@@ -132,7 +147,7 @@ public class AsaasService {
             @SuppressWarnings("unchecked")
             Map<String, Object> response = webClient.post()
                     .uri("/customers")
-                    .header("access_token", apiKey)
+                    .header("access_token", getEffectiveApiKey())
                     .bodyValue(requestBody)
                     .retrieve()
                     .bodyToMono(Map.class)
@@ -188,7 +203,7 @@ public class AsaasService {
             BigDecimal descontoValorFixo,
             Integer prazoMaximoDesconto,
             Integer numeroParcelas) {
-        if (mockEnabled) {
+        if (isMockRequest()) {
             return criarCobrancaMock(customerId, valor, dataVencimento, descricao);
         }
 
@@ -235,7 +250,7 @@ public class AsaasService {
             @SuppressWarnings("unchecked")
             Map<String, Object> response = webClient.post()
                     .uri("/payments")
-                    .header("access_token", apiKey)
+                    .header("access_token", getEffectiveApiKey())
                     .bodyValue(requestBody)
                     .retrieve()
                     .bodyToMono(Map.class)
@@ -253,7 +268,7 @@ public class AsaasService {
      * Cria uma assinatura (cobrança recorrente) no Asaas
      */
     public Map<String, Object> criarAssinatura(String customerId, BigDecimal valor, LocalDate dataInicio, String descricao) {
-        if (mockEnabled) {
+        if (isMockRequest()) {
             return criarAssinaturaMock(customerId, valor, dataInicio, descricao);
         }
 
@@ -269,7 +284,7 @@ public class AsaasService {
             @SuppressWarnings("unchecked")
             Map<String, Object> response = webClient.post()
                     .uri("/subscriptions")
-                    .header("access_token", apiKey)
+                    .header("access_token", getEffectiveApiKey())
                     .bodyValue(requestBody)
                     .retrieve()
                     .bodyToMono(Map.class)
@@ -288,7 +303,7 @@ public class AsaasService {
      * Retorna null se a cobrança não existir mais no Asaas (404)
      */
     public Map<String, Object> consultarCobranca(String paymentId) {
-        if (mockEnabled) {
+        if (isMockRequest()) {
             return consultarCobrancaMock(paymentId);
         }
 
@@ -296,7 +311,7 @@ public class AsaasService {
             @SuppressWarnings("unchecked")
             Map<String, Object> response = webClient.get()
                     .uri("/payments/{id}", paymentId)
-                    .header("access_token", apiKey)
+                    .header("access_token", getEffectiveApiKey())
                     .retrieve()
                     .bodyToMono(Map.class)
                     .block();
@@ -378,7 +393,7 @@ public class AsaasService {
      */
     @SuppressWarnings("unchecked")
     public java.util.List<Map<String, Object>> listarAssinaturas() {
-        if (mockEnabled) {
+        if (isMockRequest()) {
             return new java.util.ArrayList<>();
         }
 
@@ -396,7 +411,7 @@ public class AsaasService {
                                 .queryParam("offset", offset)
                                 .queryParam("limit", limit)
                                 .build())
-                        .header("access_token", apiKey)
+                        .header("access_token", getEffectiveApiKey())
                         .retrieve()
                         .bodyToMono(Map.class)
                         .block();
@@ -436,7 +451,7 @@ public class AsaasService {
      */
     @SuppressWarnings("unchecked")
     public java.util.List<Map<String, Object>> listarCobrancas() {
-        if (mockEnabled) {
+        if (isMockRequest()) {
             return new java.util.ArrayList<>();
         }
 
@@ -454,7 +469,7 @@ public class AsaasService {
                                 .queryParam("offset", offset)
                                 .queryParam("limit", limit)
                                 .build())
-                        .header("access_token", apiKey)
+                        .header("access_token", getEffectiveApiKey())
                         .retrieve()
                         .bodyToMono(Map.class)
                         .block();
@@ -495,7 +510,7 @@ public class AsaasService {
      */
     @SuppressWarnings("unchecked")
     public java.util.List<Map<String, Object>> listarCobrancasPorAssinatura(String subscriptionId) {
-        if (mockEnabled) {
+        if (isMockRequest()) {
             return new java.util.ArrayList<>();
         }
 
@@ -513,7 +528,7 @@ public class AsaasService {
                                 .queryParam("offset", offset)
                                 .queryParam("limit", limit)
                                 .build(subscriptionId))
-                        .header("access_token", apiKey)
+                        .header("access_token", getEffectiveApiKey())
                         .retrieve()
                         .bodyToMono(Map.class)
                         .block();
@@ -555,14 +570,14 @@ public class AsaasService {
      */
     @SuppressWarnings("unchecked")
     public Map<String, Object> buscarClientePorId(String customerId) {
-        if (mockEnabled) {
+        if (isMockRequest()) {
             return new HashMap<>();
         }
 
         try {
             Map<String, Object> response = webClient.get()
                     .uri("/customers/{id}", customerId)
-                    .header("access_token", apiKey)
+                    .header("access_token", getEffectiveApiKey())
                     .retrieve()
                     .bodyToMono(Map.class)
                     .block();
@@ -575,10 +590,10 @@ public class AsaasService {
     }
 
     /**
-     * Verifica se está em modo mock
+     * Verifica se está em modo mock (global ou por falta de chave da empresa).
      */
     public boolean isMockEnabled() {
-        return mockEnabled;
+        return isMockRequest();
     }
 }
 

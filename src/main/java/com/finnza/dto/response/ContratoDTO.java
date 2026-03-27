@@ -44,6 +44,8 @@ public class ContratoDTO {
     private LocalDate dataEncerramento;
     private String linkContrato;
     private Contrato.StatusAssinatura statusAssinatura;
+    private Contrato.WorkflowStatus workflowStatus;
+    private Contrato.FinancialStatus financialStatus;
     private String projeto;
     private BigDecimal valorEntrada;
     

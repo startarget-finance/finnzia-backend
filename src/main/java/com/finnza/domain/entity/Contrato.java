@@ -25,6 +25,8 @@ import java.util.List;
        indexes = {
            @Index(name = "idx_contrato_cliente", columnList = "cliente_id"),
            @Index(name = "idx_contrato_status", columnList = "status"),
+           @Index(name = "idx_contrato_workflow_status", columnList = "workflow_status"),
+           @Index(name = "idx_contrato_financial_status", columnList = "financial_status"),
            @Index(name = "idx_contrato_data_vencimento", columnList = "dataVencimento"),
            @Index(name = "idx_contrato_deleted", columnList = "deleted"),
            @Index(name = "idx_contrato_cliente_status", columnList = "cliente_id,status"),
@@ -68,6 +70,16 @@ public class Contrato {
     @Column(nullable = false, length = 20)
     @Builder.Default
     private StatusContrato status = StatusContrato.PENDENTE;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "workflow_status", nullable = false, length = 20)
+    @Builder.Default
+    private WorkflowStatus workflowStatus = WorkflowStatus.NOVO;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "financial_status", nullable = false, length = 20)
+    @Builder.Default
+    private FinancialStatus financialStatus = FinancialStatus.EM_DIA;
 
     @Enumerated(EnumType.STRING)
     @Column(length = 20)
@@ -147,6 +159,19 @@ public class Contrato {
     public enum TipoPagamento {
         UNICO,
         RECORRENTE
+    }
+
+    public enum WorkflowStatus {
+        NOVO,
+        ASSINATURA,
+        COBRANCA,
+        ATIVO
+    }
+
+    public enum FinancialStatus {
+        EM_DIA,
+        ATRASADO,
+        INADIMPLENTE
     }
 
     /**

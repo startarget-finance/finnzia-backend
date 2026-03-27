@@ -2,6 +2,7 @@ package com.finnza.controller;
 
 import com.finnza.domain.entity.Contrato;
 import com.finnza.dto.request.CriarContratoRequest;
+import com.finnza.dto.request.WorkflowTransitionRequest;
 import com.finnza.dto.response.ContratoDTO;
 import com.finnza.service.ContratoService;
 import jakarta.validation.Valid;
@@ -96,9 +97,11 @@ public class ContratoController {
             @RequestParam(required = false) String dueDateLe,
             @RequestParam(required = false) String paymentDateGe,
             @RequestParam(required = false) String paymentDateLe,
+            @RequestParam(required = false) String workflowStatus,
+            @RequestParam(required = false) String financialStatus,
             @PageableDefault(size = 10) Pageable pageable) {
         Page<ContratoDTO> contratos = contratoService.buscarComFiltros(
-                clienteId, status, termo, billingType, dueDateGe, dueDateLe, paymentDateGe, paymentDateLe, pageable);
+                clienteId, status, termo, billingType, dueDateGe, dueDateLe, paymentDateGe, paymentDateLe, workflowStatus, financialStatus, pageable);
         return ResponseEntity.ok(contratos);
     }
 
@@ -119,6 +122,15 @@ public class ContratoController {
     @PreAuthorize("hasPermission(null, 'CONTRATOS')")
     public ResponseEntity<ContratoDTO> sincronizarStatusComAsaas(@PathVariable Long id) {
         ContratoDTO contrato = contratoService.sincronizarStatusComAsaas(id);
+        return ResponseEntity.ok(contrato);
+    }
+
+    @PostMapping("/{id}/workflow")
+    @PreAuthorize("hasPermission(null, 'CONTRATOS')")
+    public ResponseEntity<ContratoDTO> atualizarWorkflow(
+            @PathVariable Long id,
+            @RequestBody WorkflowTransitionRequest request) {
+        ContratoDTO contrato = contratoService.atualizarWorkflow(id, request);
         return ResponseEntity.ok(contrato);
     }
 

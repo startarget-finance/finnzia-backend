@@ -5,6 +5,7 @@ import com.finnza.domain.entity.Cliente;
 import com.finnza.domain.entity.Contrato;
 import com.finnza.domain.entity.Cobranca;
 import com.finnza.dto.request.CriarContratoRequest;
+import com.finnza.dto.request.WorkflowTransitionRequest;
 import com.finnza.dto.response.ContratoDTO;
 import com.finnza.repository.ClienteRepository;
 import com.finnza.repository.ContratoRepository;
@@ -175,6 +176,8 @@ public class ContratoService {
             String dueDateLe,
             String paymentDateGe,
             String paymentDateLe,
+            String workflowStatus,
+            String financialStatus,
             Pageable pageable) {
         
         Integer idEmpresa = EmpresaContextHolder.getIdEmpresa();
@@ -215,7 +218,31 @@ public class ContratoService {
                         contrato.getCobrancas().size();
                     }
                     
-                    // Filtrar por status (status do Asaas nas cobranças)
+                    // Filtrar por workflow
+                    if (workflowStatus != null && !workflowStatus.trim().isEmpty() && !workflowStatus.equals("todos")) {
+                        try {
+                            Contrato.WorkflowStatus wf = Contrato.WorkflowStatus.valueOf(workflowStatus.trim().toUpperCase());
+                            if (contrato.getWorkflowStatus() != wf) {
+                                return false;
+                            }
+                        } catch (IllegalArgumentException ignored) {
+                            return false;
+                        }
+                    }
+
+                    // Filtrar por financeiro
+                    if (financialStatus != null && !financialStatus.trim().isEmpty() && !financialStatus.equals("todos")) {
+                        try {
+                            Contrato.FinancialStatus fs = Contrato.FinancialStatus.valueOf(financialStatus.trim().toUpperCase());
+                            if (contrato.getFinancialStatus() != fs) {
+                                return false;
+                            }
+                        } catch (IllegalArgumentException ignored) {
+                            return false;
+                        }
+                    }
+
+                    // Filtrar por status legado (status do Asaas nas cobranças)
                     if (status != null && !status.trim().isEmpty() && !status.equals("todos")) {
                         boolean statusMatch = false;
                         String statusUpper = status.toUpperCase();
@@ -553,10 +580,12 @@ public class ContratoService {
         
         // Sempre recalcular status baseado nas cobranças (mesmo em mock, baseado em datas)
         Contrato.StatusContrato statusAnterior = contrato.getStatus();
+        Contrato.FinancialStatus financeiroAnterior = contrato.getFinancialStatus();
         contrato.calcularStatusBaseadoNasCobrancas();
+        contrato.setFinancialStatus(calcularFinancialStatus(contrato));
         
-        // Salvar apenas se o status mudou
-        if (statusAnterior != contrato.getStatus()) {
+        // Salvar apenas se status legados mudaram
+        if (statusAnterior != contrato.getStatus() || financeiroAnterior != contrato.getFinancialStatus()) {
             contratoRepository.save(contrato);
             log.info("Status do contrato {} atualizado automaticamente de {} para {}", 
                     contrato.getId(), statusAnterior, contrato.getStatus());
@@ -905,6 +934,8 @@ public class ContratoService {
                 .dataEncerramento(contrato.getDataEncerramento())
                 .linkContrato(contrato.getLinkContrato())
                 .statusAssinatura(contrato.getStatusAssinatura())
+                .workflowStatus(contrato.getWorkflowStatus())
+                .financialStatus(contrato.getFinancialStatus())
                 .projeto(contrato.getProjeto())
                 .valorEntrada(contrato.getValorEntrada())
                 .build();
@@ -970,6 +1001,128 @@ public class ContratoService {
         // Tudo que não está em atraso ou inadimplente = EM_DIA
         // Isso inclui: contratos pagos, com cobranças pendentes/futuras, novos, etc.
         return ContratoDTO.CategoriaContrato.EM_DIA;
+    }
+
+    private Contrato.FinancialStatus calcularFinancialStatus(Contrato contrato) {
+        ContratoDTO.CategoriaContrato categoria = calcularCategoria(contrato);
+        return switch (categoria) {
+            case INADIMPLENTE -> Contrato.FinancialStatus.INADIMPLENTE;
+            case EM_ATRASO -> Contrato.FinancialStatus.ATRASADO;
+            default -> Contrato.FinancialStatus.EM_DIA;
+        };
+    }
+
+    @Transactional
+    public ContratoDTO atualizarWorkflow(Long id, WorkflowTransitionRequest request) {
+        if (request == null || request.getAction() == null || request.getAction().isBlank()) {
+            throw new RuntimeException("Ação de workflow é obrigatória");
+        }
+        Contrato contrato = contratoRepository.findById(id)
+                .orElseThrow(() -> new RuntimeException("Contrato não encontrado"));
+        Integer idEmpresa = EmpresaContextHolder.getIdEmpresa();
+        if (idEmpresa != null && contrato.getIdEmpresa() != null && !idEmpresa.equals(contrato.getIdEmpresa())) {
+            throw new RuntimeException("Contrato não encontrado");
+        }
+
+        String action = request.getAction().trim().toUpperCase();
+        Contrato.WorkflowStatus atual = contrato.getWorkflowStatus() == null
+                ? Contrato.WorkflowStatus.NOVO
+                : contrato.getWorkflowStatus();
+
+        switch (action) {
+            case "ENVIAR_PARA_ASSINATURA" -> {
+                if (atual != Contrato.WorkflowStatus.NOVO) {
+                    throw new RuntimeException("Transição inválida para assinatura.");
+                }
+                contrato.setWorkflowStatus(Contrato.WorkflowStatus.ASSINATURA);
+            }
+            case "MARCAR_COMO_ASSINADO" -> {
+                if (atual != Contrato.WorkflowStatus.ASSINATURA) {
+                    throw new RuntimeException("Transição inválida para cobrança.");
+                }
+                contrato.setWorkflowStatus(Contrato.WorkflowStatus.COBRANCA);
+            }
+            case "GERAR_COBRANCA" -> {
+                if (atual != Contrato.WorkflowStatus.COBRANCA) {
+                    throw new RuntimeException("Cobrança só pode ser gerada na etapa cobrança.");
+                }
+                gerarCobrancaWorkflow(contrato);
+                contrato.setWorkflowStatus(Contrato.WorkflowStatus.COBRANCA);
+            }
+            case "ATIVAR_CONTRATO" -> {
+                if (atual != Contrato.WorkflowStatus.COBRANCA) {
+                    throw new RuntimeException("Ativação só pode ocorrer após cobrança.");
+                }
+                contrato.setWorkflowStatus(Contrato.WorkflowStatus.ATIVO);
+            }
+            default -> throw new RuntimeException("Ação de workflow inválida: " + action);
+        }
+
+        contrato = contratoRepository.save(contrato);
+        return toDTO(contrato);
+    }
+
+    private void gerarCobrancaWorkflow(Contrato contrato) {
+        Cliente cliente = contrato.getCliente();
+        if (cliente == null) {
+            throw new RuntimeException("Contrato sem cliente vinculado.");
+        }
+
+        if (cliente.getAsaasCustomerId() == null || cliente.getAsaasCustomerId().isBlank()) {
+            String asaasCustomerId = asaasService.criarCliente(cliente);
+            if (asaasCustomerId != null && !asaasCustomerId.isBlank()) {
+                cliente.setAsaasCustomerId(asaasCustomerId);
+                clienteRepository.save(cliente);
+            }
+        }
+
+        // Recorrente: garante assinatura no Asaas e importa/sincroniza cobranças.
+        if (contrato.getTipoPagamento() == Contrato.TipoPagamento.RECORRENTE) {
+            if (contrato.getAsaasSubscriptionId() == null || contrato.getAsaasSubscriptionId().isBlank()) {
+                criarAssinatura(contrato, cliente);
+            }
+            if (contrato.getAsaasSubscriptionId() != null && !contrato.getAsaasSubscriptionId().isBlank()) {
+                importarCobrancasDoAsaas(contrato);
+                sincronizarCobrancasComAsaas(contrato);
+            }
+            contrato.calcularStatusBaseadoNasCobrancas();
+            contrato.setFinancialStatus(calcularFinancialStatus(contrato));
+            return;
+        }
+
+        // Único: se não existir cobrança em aberto, cria nova cobrança no Asaas.
+        boolean possuiCobrancaAberta = contrato.getCobrancas() != null && contrato.getCobrancas().stream().anyMatch(c ->
+                c.getStatus() == Cobranca.StatusCobranca.PENDING || c.getStatus() == Cobranca.StatusCobranca.OVERDUE);
+
+        if (!possuiCobrancaAberta && cliente.getAsaasCustomerId() != null && !cliente.getAsaasCustomerId().isBlank()) {
+            String descricao = contrato.getDescricao() != null && !contrato.getDescricao().isBlank()
+                    ? contrato.getDescricao()
+                    : String.format("Contrato: %s", contrato.getTitulo());
+            LocalDate vencimento = contrato.getDataVencimento() != null ? contrato.getDataVencimento() : LocalDate.now().plusDays(7);
+            BigDecimal valor = contrato.getValorContrato() != null ? contrato.getValorContrato() : BigDecimal.ZERO;
+
+            Map<String, Object> response = asaasService.criarCobrancaUnica(
+                    cliente.getAsaasCustomerId(),
+                    valor,
+                    vencimento,
+                    descricao
+            );
+
+            Cobranca cobranca = Cobranca.builder()
+                    .contrato(contrato)
+                    .valor(valor)
+                    .dataVencimento(vencimento)
+                    .status(Cobranca.StatusCobranca.PENDING)
+                    .asaasPaymentId((String) response.get("id"))
+                    .linkPagamento((String) response.get("invoiceUrl"))
+                    .codigoBarras((String) response.get("barcode"))
+                    .numeroParcela(1)
+                    .build();
+            contrato.adicionarCobranca(cobranca);
+        }
+
+        contrato.calcularStatusBaseadoNasCobrancas();
+        contrato.setFinancialStatus(calcularFinancialStatus(contrato));
     }
     
     /**

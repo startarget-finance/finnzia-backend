@@ -116,4 +116,7 @@ public interface EmpresaUsuarioRepository extends JpaRepository<EmpresaUsuario, 
      */
     @Query("SELECT DISTINCT eu.idEmpresa FROM EmpresaUsuario eu WHERE eu.ativo = true ORDER BY eu.idEmpresa ASC")
     List<Integer> findAllActiveEmpresaIds();
+
+    /** Qualquer vínculo ativo com esse idEmpresa (para exibir nome em cadastros internos). */
+    Optional<EmpresaUsuario> findFirstByIdEmpresaAndAtivoTrueOrderByIdAsc(Integer idEmpresa);
 }

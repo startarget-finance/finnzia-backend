@@ -11,6 +11,8 @@ import org.springframework.data.annotation.LastModifiedDate;
 import org.springframework.data.jpa.domain.support.AuditingEntityListener;
 
 import java.time.LocalDateTime;
+import java.util.HashSet;
+import java.util.Set;
 
 /**
  * Entidade Cliente
@@ -22,15 +24,21 @@ import java.time.LocalDateTime;
            @Index(name = "idx_cliente_cpf_cnpj", columnList = "cpfCnpj"),
            @Index(name = "idx_cliente_email", columnList = "emailFinanceiro"),
            @Index(name = "idx_cliente_asaas_id", columnList = "asaasCustomerId"),
-           @Index(name = "idx_cliente_deleted", columnList = "deleted")
+           @Index(name = "idx_cliente_deleted", columnList = "deleted"),
+           @Index(name = "idx_cliente_tipo_pessoa", columnList = "tipoPessoa")
        })
 @EntityListeners(AuditingEntityListener.class)
 @Data
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
-@EqualsAndHashCode
+@EqualsAndHashCode(exclude = "idEmpresas")
 public class Cliente {
+
+    public enum TipoPessoa {
+        PF,
+        PJ
+    }
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
@@ -42,8 +50,30 @@ public class Cliente {
     @Column(length = 200)
     private String nomeFantasia;
 
-    @Column(nullable = false, length = 20)
+    /** Pode ser nulo quando ainda não há documento (cadastro manual na parametrização). */
+    @Column(length = 20)
     private String cpfCnpj;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "tipo_pessoa", length = 2)
+    @Builder.Default
+    private TipoPessoa tipoPessoa = TipoPessoa.PJ;
+
+    /** Classificação 1–5 (estrelas no cadastro). */
+    @Column(name = "classificacao")
+    @Builder.Default
+    private Integer classificacao = 3;
+
+    @ElementCollection(fetch = FetchType.EAGER)
+    @CollectionTable(name = "cliente_empresa", joinColumns = @JoinColumn(name = "cliente_id", nullable = false))
+    @Column(name = "id_empresa", nullable = false)
+    @Builder.Default
+    private Set<Integer> idEmpresas = new HashSet<>();
+
+    /** Bloqueio operacional (cadastro inativo sem apagar). */
+    @Column(name = "bloqueado", nullable = false)
+    @Builder.Default
+    private Boolean bloqueado = false;
 
     @Column(length = 500)
     private String enderecoCompleto;

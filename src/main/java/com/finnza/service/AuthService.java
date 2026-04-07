@@ -19,6 +19,7 @@ import org.springframework.security.core.userdetails.UserDetailsService;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import lombok.extern.slf4j.Slf4j;
 
 import java.time.LocalDateTime;
 import java.util.UUID;
@@ -26,6 +27,7 @@ import java.util.UUID;
 /**
  * Serviço de autenticação
  */
+@Slf4j
 @Service
 @Transactional
 public class AuthService {
@@ -74,7 +76,16 @@ public class AuthService {
                     .usuario(UsuarioDTO.fromEntity(usuario))
                     .build();
 
+        } catch (BadCredentialsException e) {
+            log.warn("Login recusado (credenciais) — email={}: {}", request.getEmail(), e.getMessage());
+            throw e;
+        } catch (org.springframework.security.core.userdetails.UsernameNotFoundException e) {
+            log.warn("Login recusado — usuário não encontrado ou inativo: email={}", request.getEmail());
+            throw new BadCredentialsException("Email ou senha inválidos");
         } catch (Exception e) {
+            log.warn("Login recusado — email={} — {}: {}",
+                    request.getEmail(), e.getClass().getSimpleName(), e.getMessage());
+            log.debug("Stack login", e);
             throw new BadCredentialsException("Email ou senha inválidos");
         }
     }

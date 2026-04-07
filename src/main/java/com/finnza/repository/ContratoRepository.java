@@ -79,6 +79,18 @@ public interface ContratoRepository extends JpaRepository<Contrato, Long> {
     Optional<Contrato> findByAsaasSubscriptionId(@Param("asaasSubscriptionId") String asaasSubscriptionId);
 
     /**
+     * Contrato “balde” de cobranças avulsas (UNICO, sem assinatura Asaas) por cliente, para agrupar parcelas do mesmo cliente.
+     */
+    @Query("SELECT c FROM Contrato c WHERE c.cliente.id = :clienteId AND c.deleted = false AND "
+            + "c.tipoPagamento = com.finnza.domain.entity.Contrato.TipoPagamento.UNICO AND "
+            + "c.asaasSubscriptionId IS NULL AND "
+            + "(c.idEmpresa = :idEmpresa OR (c.idEmpresa IS NULL AND :idEmpresa IS NULL)) "
+            + "ORDER BY c.id ASC")
+    List<Contrato> findContratosAvulsosAgregaveisCliente(@Param("clienteId") Long clienteId,
+                                                         @Param("idEmpresa") Integer idEmpresa,
+                                                         Pageable pageable);
+
+    /**
      * Busca contratos com filtros básicos (título, cliente, termo)
      */
     @Query("SELECT c FROM Contrato c JOIN c.cliente cl WHERE " +

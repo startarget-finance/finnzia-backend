@@ -66,11 +66,11 @@
             <scope>runtime</scope>
         </dependency>
         
-        <!-- H2 Database (para desenvolvimento) -->
+        <!-- H2 só em testes (evita Spring subir H2 em memória no main quando a URL do Postgres some do Environment) -->
         <dependency>
             <groupId>com.h2database</groupId>
             <artifactId>h2</artifactId>
-            <scope>runtime</scope>
+            <scope>test</scope>
         </dependency>
         
         <!-- JWT -->

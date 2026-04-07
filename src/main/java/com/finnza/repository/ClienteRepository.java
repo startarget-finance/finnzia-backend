@@ -4,6 +4,7 @@ import com.finnza.domain.entity.Cliente;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
@@ -14,12 +15,12 @@ import java.util.Optional;
  * Repository para Cliente
  */
 @Repository
-public interface ClienteRepository extends JpaRepository<Cliente, Long> {
+public interface ClienteRepository extends JpaRepository<Cliente, Long>, JpaSpecificationExecutor<Cliente> {
 
     /**
      * Busca cliente por CPF/CNPJ (não deletado)
      */
-    @Query("SELECT c FROM Cliente c WHERE c.cpfCnpj = :cpfCnpj AND c.deleted = false")
+    @Query("SELECT c FROM Cliente c WHERE c.cpfCnpj = :cpfCnpj AND c.deleted = false AND c.cpfCnpj IS NOT NULL")
     Optional<Cliente> findByCpfCnpj(@Param("cpfCnpj") String cpfCnpj);
 
     /**
@@ -42,5 +43,11 @@ public interface ClienteRepository extends JpaRepository<Cliente, Long> {
            "LOWER(c.nomeFantasia) LIKE LOWER(CONCAT('%', :termo, '%'))) " +
            "AND c.deleted = false")
     Page<Cliente> buscarPorTermo(@Param("termo") String termo, Pageable pageable);
+
+    @Query("SELECT c FROM Cliente c WHERE c.id = :id AND c.deleted = false")
+    Optional<Cliente> findByIdNaoDeletado(@Param("id") Long id);
+
+    @Query("SELECT c FROM Cliente c WHERE c.cpfCnpj = :cpf AND c.deleted = false AND c.cpfCnpj IS NOT NULL AND (:id IS NULL OR c.id <> :id)")
+    Optional<Cliente> findOutroPorCpfCnpj(@Param("cpf") String cpf, @Param("id") Long id);
 }
 

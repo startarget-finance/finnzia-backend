@@ -18,10 +18,13 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import org.springframework.data.domain.PageRequest;
+
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.stream.Collectors;
 
@@ -776,9 +779,11 @@ public class ContratoService {
                     .orElseThrow(() -> new RuntimeException("Cliente não encontrado"));
         }
 
-        // Verifica se já existe por CPF/CNPJ
-        Cliente cliente = clienteRepository.findByCpfCnpj(dadosCliente.getCpfCnpj())
-                .orElse(null);
+        // Verifica se já existe por CPF/CNPJ (só quando informado)
+        Cliente cliente = null;
+        if (dadosCliente.getCpfCnpj() != null && !dadosCliente.getCpfCnpj().isBlank()) {
+            cliente = clienteRepository.findByCpfCnpj(dadosCliente.getCpfCnpj()).orElse(null);
+        }
 
         if (cliente == null) {
             // Cria novo cliente
@@ -1687,25 +1692,73 @@ public class ContratoService {
 
             String tituloCobranca = (String) cobrancaAsaas.get("description");
             if (tituloCobranca == null || tituloCobranca.trim().isEmpty()) {
-                tituloCobranca = "Cobrança Avulsa - " + cliente.getRazaoSocial();
+                tituloCobranca = "Cobranças avulsas - " + cliente.getRazaoSocial();
             }
 
-            Contrato contrato = Contrato.builder()
+            String statusStr = (String) cobrancaAsaas.get("status");
+            Cobranca.StatusCobranca status = mapearStatusCobranca(statusStr);
+
+            Integer idEmpresa = EmpresaContextHolder.getIdEmpresa();
+            List<Contrato> baldeExistente = contratoRepository.findContratosAvulsosAgregaveisCliente(
+                    cliente.getId(), idEmpresa, PageRequest.of(0, 1));
+
+            Contrato contrato;
+            if (!baldeExistente.isEmpty()) {
+                contrato = baldeExistente.get(0);
+                int nextParcela = contrato.getCobrancas().stream()
+                        .mapToInt(c -> c.getNumeroParcela() != null ? c.getNumeroParcela() : 0)
+                        .max()
+                        .orElse(0) + 1;
+
+                Cobranca cobranca = Cobranca.builder()
+                        .contrato(contrato)
+                        .valor(valor)
+                        .dataVencimento(dataVencimento)
+                        .dataPagamento(dataPagamento)
+                        .status(status)
+                        .asaasPaymentId(paymentId)
+                        .linkPagamento((String) cobrancaAsaas.get("invoiceUrl"))
+                        .codigoBarras((String) cobrancaAsaas.get("nossoNumero"))
+                        .numeroParcela(nextParcela)
+                        .build();
+
+                contrato.adicionarCobranca(cobranca);
+
+                BigDecimal totalValor = contrato.getCobrancas().stream()
+                        .map(Cobranca::getValor)
+                        .filter(Objects::nonNull)
+                        .reduce(BigDecimal.ZERO, BigDecimal::add);
+                contrato.setValorContrato(totalValor);
+
+                LocalDate proxVenc = contrato.getCobrancas().stream()
+                        .filter(c -> c.getStatus() == Cobranca.StatusCobranca.PENDING
+                                || c.getStatus() == Cobranca.StatusCobranca.OVERDUE)
+                        .map(Cobranca::getDataVencimento)
+                        .filter(Objects::nonNull)
+                        .min(LocalDate::compareTo)
+                        .orElse(dataVencimento != null ? dataVencimento : contrato.getDataVencimento());
+                contrato.setDataVencimento(proxVenc != null ? proxVenc : contrato.getDataVencimento());
+
+                contrato.calcularStatusBaseadoNasCobrancas();
+                contratoRepository.save(contrato);
+
+                log.info("✓ Cobrança avulsa agregada ao contrato {} (parcela {}): PaymentId={}, Cliente={}",
+                        contrato.getId(), nextParcela, paymentId, cliente.getRazaoSocial());
+                return true;
+            }
+
+            contrato = Contrato.builder()
                     .titulo(tituloCobranca)
-                    .descricao("Cobrança avulsa importada do Asaas")
+                    .descricao("Cobranças avulsas importadas do Asaas (agrupadas por cliente)")
                     .cliente(cliente)
                     .valorContrato(valor)
                     .dataVencimento(dataVencimento != null ? dataVencimento : LocalDate.now().plusDays(30))
                     .status(Contrato.StatusContrato.PENDENTE)
                     .tipoPagamento(Contrato.TipoPagamento.UNICO)
-                    .idEmpresa(EmpresaContextHolder.getIdEmpresa())
+                    .idEmpresa(idEmpresa)
                     .build();
 
             contrato = contratoRepository.save(contrato);
-
-            // Criar cobrança
-            String statusStr = (String) cobrancaAsaas.get("status");
-            Cobranca.StatusCobranca status = mapearStatusCobranca(statusStr);
 
             Cobranca cobranca = Cobranca.builder()
                     .contrato(contrato)
@@ -1720,12 +1773,11 @@ public class ContratoService {
                     .build();
 
             contrato.adicionarCobranca(cobranca);
-            // Recalcular status baseado nas cobranças
             contrato.calcularStatusBaseadoNasCobrancas();
             contratoRepository.save(contrato);
-            
-            log.info("✓ Cobrança avulsa importada: ID={}, PaymentId={}, Status={}, Cliente={}", 
-                    cobranca.getId(), paymentId, statusStr, cliente.getRazaoSocial());
+
+            log.info("✓ Cobrança avulsa importada: contrato={}, PaymentId={}, Status={}, Cliente={}",
+                    contrato.getId(), paymentId, statusStr, cliente.getRazaoSocial());
             return true;
         } catch (Exception e) {
             log.error("Erro ao criar contrato único importado: {}", e.getMessage(), e);

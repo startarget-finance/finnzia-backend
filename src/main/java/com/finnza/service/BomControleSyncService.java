@@ -58,6 +58,7 @@ public class BomControleSyncService {
 
     private final MovimentacaoFinanceiraRepository movimentacaoRepo;
     private final SyncStatusRepository syncStatusRepo;
+    private final BomControleSyncStatusHelper syncStatusHelper;
     private final ObjectMapper objectMapper;
     private final WebClient webClient;
 
@@ -112,6 +113,7 @@ public class BomControleSyncService {
     public BomControleSyncService(
             MovimentacaoFinanceiraRepository movimentacaoRepo,
             SyncStatusRepository syncStatusRepo,
+            BomControleSyncStatusHelper syncStatusHelper,
             ObjectMapper objectMapper,
             @Value("${bomcontrole.api.key:}") String apiKey,
             @Value("${bomcontrole.api.url:https://apinewintegracao.bomcontrole.com.br}") String baseUrl,
@@ -119,6 +121,7 @@ public class BomControleSyncService {
 
         this.movimentacaoRepo = movimentacaoRepo;
         this.syncStatusRepo   = syncStatusRepo;
+        this.syncStatusHelper = syncStatusHelper;
         this.objectMapper     = objectMapper;
 
         ExchangeStrategies strategies = ExchangeStrategies.builder()
@@ -370,35 +373,12 @@ public class BomControleSyncService {
         String periodo = dataInicio.substring(0, 7); // yyyy-MM
         String key     = buildKey(periodo, idEmpresa);
 
-        // Verifica se já está sincronizando
-        Optional<SyncStatus> existente = syncStatusRepo.findByPeriodoEmpresaKey(key);
-        if (existente.isPresent() && "sincronizando".equals(existente.get().getStatus())) {
-            log.info("⚠️  Período {} já está sendo sincronizado", key);
-            return Map.of("sucesso", false, "mensagem", "Período já em sincronização", "periodoKey", key);
+        BomControleSyncStatusHelper.BeginSyncResult prep =
+                syncStatusHelper.prepareBegin(periodo, idEmpresa, key, skipIfRecent);
+        if (prep.isAbort()) {
+            return prep.earlyResponse;
         }
-
-        // Pula se foi sincronizado recentemente
-        if (skipIfRecent && existente.isPresent()
-                && "completo".equals(existente.get().getStatus())
-                && existente.get().getUltimaSync() != null) {
-            long mins = Duration.between(existente.get().getUltimaSync(), LocalDateTime.now()).toMinutes();
-            if (mins < 60) {
-                log.debug("⏭️  Período {} sincronizado há {} min — pulando", key, mins);
-                return Map.of("sucesso", true, "mensagem", "Sync recente, não necessário", "periodoKey", key);
-            }
-        }
-
-        // Marca como "sincronizando"
-        SyncStatus syncStatus = existente.orElse(
-                SyncStatus.builder()
-                        .periodo(periodo)
-                        .idEmpresa(idEmpresa)
-                        .periodoEmpresaKey(key)
-                        .totalRegistros(0)
-                        .build());
-        syncStatus.setStatus("sincronizando");
-        syncStatus.setMensagemErro(null);
-        syncStatusRepo.save(syncStatus);
+        Long syncStatusId = prep.syncStatusId;
 
         log.info("🔄 Iniciando sync — key={} período={} a {}", key, dataInicio, dataTermino);
 
@@ -419,11 +399,7 @@ public class BomControleSyncService {
 
             int salvos = salvarMovimentacoes(movimentacoes, idEmpresa);
 
-            syncStatus.setStatus("completo");
-            syncStatus.setUltimaSync(LocalDateTime.now());
-            syncStatus.setTotalRegistros(salvos);
-            syncStatus.setMensagemErro(null);
-            syncStatusRepo.save(syncStatus);
+            syncStatusHelper.markComplete(syncStatusId, salvos);
 
             log.info("✅ Sync concluído — key={} salvos={}", key, salvos);
             return Map.of(
@@ -435,15 +411,11 @@ public class BomControleSyncService {
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
             log.warn("⚠️  Sync interrompido aguardando lock da API: {}", key);
-            syncStatus.setStatus("erro");
-            syncStatus.setMensagemErro("Interrompido aguardando lock");
-            syncStatusRepo.save(syncStatus);
+            syncStatusHelper.markError(syncStatusId, "Interrompido aguardando lock");
             return Map.of("sucesso", false, "mensagem", "Sync interrompido", "periodoKey", key);
         } catch (Exception e) {
             log.error("❌ Erro ao sincronizar {}", key, e);
-            syncStatus.setStatus("erro");
-            syncStatus.setMensagemErro(e.getMessage());
-            syncStatusRepo.save(syncStatus);
+            syncStatusHelper.markError(syncStatusId, e.getMessage());
             throw new RuntimeException("Erro ao sincronizar período: " + e.getMessage(), e);
         }
     }

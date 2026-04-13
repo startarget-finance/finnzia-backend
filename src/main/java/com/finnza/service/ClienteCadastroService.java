@@ -1,5 +1,6 @@
 package com.finnza.service;
 
+import com.finnza.config.EmpresaContextHolder;
 import com.finnza.domain.entity.Cliente;
 import com.finnza.domain.entity.EmpresaUsuario;
 import com.finnza.domain.entity.Usuario;
@@ -44,6 +45,13 @@ public class ClienteCadastroService {
         Usuario usuario = usuarioRepository.findByEmail(emailUsuario)
                 .orElseThrow(() -> new IllegalArgumentException("Usuário não encontrado"));
 
+        if (idEmpresa == null || idEmpresa <= 0) {
+            Integer ctx = EmpresaContextHolder.getIdEmpresa();
+            if (ctx != null && ctx > 0) {
+                idEmpresa = ctx;
+            }
+        }
+
         Specification<Cliente> spec = Specification.where(ClienteCadastroSpecification.naoDeletado())
                 .and(ClienteCadastroSpecification.textoBusca(q))
                 .and(ClienteCadastroSpecification.classificacaoIgual(classificacao))
@@ -77,11 +85,7 @@ public class ClienteCadastroService {
         Usuario usuario = usuarioRepository.findByEmail(emailUsuario)
                 .orElseThrow(() -> new IllegalArgumentException("Usuário não encontrado"));
 
-        Set<Integer> idsReq = new HashSet<>(Optional.ofNullable(req.getIdEmpresas()).orElseGet(HashSet::new));
-        idsReq.removeIf(Objects::isNull);
-        if (idsReq.isEmpty() && usuario.getRole() != Usuario.Role.ADMIN) {
-            throw new IllegalArgumentException("Associe pelo menos uma empresa (apenas admin pode criar sem empresas).");
-        }
+        Set<Integer> idsReq = resolverEmpresasParaEscrita(usuario, req.getIdEmpresas());
         validarEmpresasNoRequest(emailUsuario, idsReq);
 
         String cpfNorm = normalizarCpfCnpj(req.getCpfCnpj());
@@ -117,11 +121,7 @@ public class ClienteCadastroService {
             throw new IllegalArgumentException("Sem permissão para editar este cliente");
         }
 
-        Set<Integer> idsNovos = new HashSet<>(Optional.ofNullable(req.getIdEmpresas()).orElseGet(HashSet::new));
-        idsNovos.removeIf(Objects::isNull);
-        if (idsNovos.isEmpty() && usuario.getRole() != Usuario.Role.ADMIN) {
-            throw new IllegalArgumentException("Mantenha pelo menos uma empresa vinculada (apenas admin pode deixar sem empresas).");
-        }
+        Set<Integer> idsNovos = resolverEmpresasParaEscrita(usuario, req.getIdEmpresas());
         validarEmpresasNoRequest(emailUsuario, idsNovos);
 
         String cpfNorm = normalizarCpfCnpj(req.getCpfCnpj());
@@ -236,6 +236,22 @@ public class ClienteCadastroService {
             return false;
         }
         return ids.stream().allMatch(idE -> usuarioEmpresaService.temAcesso(usuario.getId(), idE));
+    }
+
+    /**
+     * Com {@code X-Empresa-Id}, gravações ficam restritas à empresa do contexto (parametrização por empresa).
+     */
+    private Set<Integer> resolverEmpresasParaEscrita(Usuario usuario, Set<Integer> doRequest) {
+        Integer ctx = EmpresaContextHolder.getIdEmpresa();
+        if (ctx != null && ctx > 0) {
+            return new HashSet<>(Set.of(ctx));
+        }
+        Set<Integer> idsReq = new HashSet<>(Optional.ofNullable(doRequest).orElseGet(HashSet::new));
+        idsReq.removeIf(Objects::isNull);
+        if (idsReq.isEmpty() && usuario.getRole() != Usuario.Role.ADMIN) {
+            throw new IllegalArgumentException("Associe pelo menos uma empresa ou selecione uma no sistema.");
+        }
+        return idsReq;
     }
 
     private void validarEmpresasNoRequest(String emailUsuario, Set<Integer> idEmpresas) {

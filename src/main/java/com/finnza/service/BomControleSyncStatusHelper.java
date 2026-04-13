@@ -19,7 +19,7 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * Isola leituras/escritas em {@code bc_sync_status} em transações curtas (REQUIRES_NEW)
  * e serializa por {@code periodo_empresa_key}, evitando corrida entre o startup runner,
- * jobs e {@code AUTO-BOOTSTRAP} ao inserir a mesma linha no H2/Postgres.
+ * jobs e {@code AUTO-BOOTSTRAP} ao inserir a mesma linha no Postgres.
  */
 @Slf4j
 @Service

@@ -9,47 +9,36 @@ import com.github.tomakehurst.wiremock.client.WireMock;
 import com.github.tomakehurst.wiremock.core.WireMockConfiguration;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.test.context.DynamicPropertyRegistry;
-import org.springframework.test.context.DynamicPropertySource;
-import org.springframework.test.context.TestPropertySource;
 
 import java.time.LocalDate;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-@SpringBootTest
+/**
+ * Integração HTTP do {@link BomControleService} contra WireMock (sem Spring context, sem banco).
+ */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
-@TestPropertySource(properties = {
-        "spring.datasource.url=jdbc:h2:mem:bc_int_test;DB_CLOSE_DELAY=-1;MODE=PostgreSQL",
-        "spring.datasource.driver-class-name=org.h2.Driver",
-        "spring.datasource.username=sa",
-        "spring.datasource.password=",
-        "spring.jpa.hibernate.ddl-auto=none",
-        "spring.jpa.show-sql=false",
-        "spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.H2Dialect"
-})
 class BomControleServiceIntegrationTest {
 
-    private static final WireMockServer wireMockServer = new WireMockServer(WireMockConfiguration.options().dynamicPort());
+    private static final WireMockServer wireMockServer =
+            new WireMockServer(WireMockConfiguration.options().dynamicPort());
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
-    static {
-        wireMockServer.start();
-    }
-
-    @Autowired
     private BomControleService bomControleService;
 
-    @DynamicPropertySource
-    static void registerDynamicProperties(DynamicPropertyRegistry registry) {
-        registry.add("bomcontrole.api.url", () -> String.format("http://localhost:%d", wireMockServer.port()));
-        registry.add("bomcontrole.api.key", () -> "integration-key");
-        registry.add("bomcontrole.mock.enabled", () -> "false");
+    @BeforeAll
+    void startWireMock() {
+        wireMockServer.start();
+        String baseUrl = String.format("http://localhost:%d", wireMockServer.port());
+        bomControleService = new BomControleService(
+                "integration-key",
+                baseUrl,
+                false,
+                new BomControleRateLimiter());
     }
 
     @AfterEach

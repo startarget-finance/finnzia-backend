@@ -36,10 +36,9 @@ public class FinnzaApplication {
             String propUrl = env.getProperty("spring.datasource.url");
             String jdbcUrl = resolverJdbcUrl(dataSource);
 
-            if (jdbcUrl != null && jdbcUrl.contains("jdbc:h2")) {
+            if (jdbcUrl != null && !jdbcUrl.contains("postgresql")) {
                 log.warn(
-                        "Datasource é H2 ({}). Para Postgres local, confira application.properties e remova "
-                                + "SPRING_DATASOURCE_URL vazia nas variáveis de ambiente do IntelliJ.",
+                        "Datasource não é PostgreSQL ({}). Ajuste spring.datasource.* e variáveis de ambiente (ex.: não use SPRING_DATASOURCE_URL vazia no IntelliJ).",
                         jdbcUrl);
             }
 

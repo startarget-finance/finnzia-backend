@@ -329,6 +329,8 @@ public class BomControleController {
             @RequestParam(required = false) String categoria,
             @RequestParam(required = false) String tipo,
             @RequestParam(required = false) String statusPagamento,
+            @RequestParam(required = false, defaultValue = "data") String orderBy,
+            @RequestParam(required = false, defaultValue = "asc") String orderDirection,
             @RequestParam(required = false, defaultValue = "50") Integer itensPorPagina,
             @RequestParam(required = false, defaultValue = "1") Integer numeroDaPagina) {
         
@@ -403,7 +405,7 @@ public class BomControleController {
                 Map<String, Object> resultado = syncService.buscarMovimentacoesDoDb(
                         dataInicioFinal, dataTerminoFinal,
                         tipoData, idsEmpresa,
-                        debitoFiltro, statusPagamento, null, null,
+                        debitoFiltro, statusPagamento, orderBy, orderDirection,
                         itensPorPagina, numeroDaPagina);
                 return ResponseEntity.ok(resultado);
             }
@@ -608,12 +610,14 @@ public class BomControleController {
             @RequestParam(required = false) String categoria,
             @RequestParam(required = false) String tipo,
             @RequestParam(required = false) String statusPagamento,
+            @RequestParam(required = false, defaultValue = "data") String orderBy,
+            @RequestParam(required = false, defaultValue = "asc") String orderDirection,
             @RequestParam(required = false, defaultValue = "50") Integer itensPorPagina,
             @RequestParam(required = false, defaultValue = "1") Integer numeroDaPagina) {
         
         // Mesma lógica do buscarMovimentacoes, mas pode ter comportamento diferente no futuro
         return buscarMovimentacoes(headerEmpresaId, dataInicio, dataTermino, tipoData, idsEmpresa, idsCliente, idsFornecedor,
-                textoPesquisa, categoria, tipo, statusPagamento, itensPorPagina, numeroDaPagina);
+                textoPesquisa, categoria, tipo, statusPagamento, orderBy, orderDirection, itensPorPagina, numeroDaPagina);
     }
 
     /**

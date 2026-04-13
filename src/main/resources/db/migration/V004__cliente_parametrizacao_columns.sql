@@ -36,7 +36,12 @@ CREATE INDEX IF NOT EXISTS idx_cliente_empresa_cliente_id ON public.cliente_empr
 -- FK defensiva (só cria se ainda não existir)
 DO $$
 BEGIN
-    IF NOT EXISTS (
+    IF EXISTS (
+        SELECT 1
+        FROM information_schema.tables
+        WHERE table_schema = 'public'
+          AND table_name = 'clientes'
+    ) AND NOT EXISTS (
         SELECT 1
         FROM pg_constraint
         WHERE conname = 'fk_cliente_empresa_cliente'

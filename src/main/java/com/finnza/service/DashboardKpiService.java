@@ -2,11 +2,13 @@ package com.finnza.service;
 
 import com.finnza.domain.entity.Cobranca;
 import com.finnza.domain.entity.Contrato;
-import com.finnza.dto.response.DfcResponseDTO;
+import com.finnza.domain.entity.MovimentacaoFinanceira;
 import com.finnza.dto.response.ResumoFinanceiroDTO;
 import com.finnza.repository.ContratoRepository;
+import com.finnza.repository.MovimentacaoFinanceiraRepository;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
@@ -28,17 +30,18 @@ import java.util.stream.Collectors;
 @Service
 public class DashboardKpiService {
 
-    private final BomControleSyncService syncService;
+    private final MovimentacaoFinanceiraRepository movimentacaoRepository;
     private final ContratoRepository contratoRepository;
 
     public DashboardKpiService(
-            BomControleSyncService syncService,
+            MovimentacaoFinanceiraRepository movimentacaoRepository,
             ContratoRepository contratoRepository
     ) {
-        this.syncService = syncService;
+        this.movimentacaoRepository = movimentacaoRepository;
         this.contratoRepository = contratoRepository;
     }
 
+    @Transactional(readOnly = true)
     public void preencherKPIs(
             ResumoFinanceiroDTO resumo,
             LocalDate dataInicio,
@@ -49,61 +52,71 @@ public class DashboardKpiService {
             return;
         }
 
+        inicializarComZero(resumo);
+
         if (idEmpresa == null || idEmpresa <= 0) {
-            // Mantém campos como null (o frontend exibe —).
             return;
         }
 
         LocalDate end = (dataTermino != null) ? dataTermino : LocalDate.now();
         LocalDate start3 = end.withDayOfMonth(1).minusMonths(2); // janela 3 meses
         LocalDate start6 = end.withDayOfMonth(1).minusMonths(5); // janela 6 meses
+        LocalDate inicioSelecionado = (dataInicio != null) ? dataInicio : start6;
 
         // =========================
-        // Custos e Novos Contratos
+        // Custos / Novos contratos (R$) via movimentações
         // =========================
         try {
-            DfcResponseDTO dfcNovos3m = syncService.gerarDFCDoDb(start3, end, idEmpresa);
-            double faturamentoNovos = dfcNovos3m != null && dfcNovos3m.getIndicadores() != null
-                    ? dfcNovos3m.getIndicadores().getFaturamentoNovosContratos()
-                    : 0d;
-            resumo.setMediaNovosContratosReais3m(faturamentoNovos / 3d);
+            List<MovimentacaoFinanceira> mov3 =
+                    movimentacaoRepository.findAllByIdEmpresaAndDataVencimentoBetween(idEmpresa, start3, end);
+            List<MovimentacaoFinanceira> mov6 =
+                    movimentacaoRepository.findAllByIdEmpresaAndDataVencimentoBetween(idEmpresa, start6, end);
+            List<MovimentacaoFinanceira> movPeriodo =
+                    movimentacaoRepository.findAllByIdEmpresaAndDataVencimentoBetween(idEmpresa, inicioSelecionado, end);
 
-            // Unidades (contratos criados na janela 3m)
-            List<Contrato> contratos = contratoRepository.findAllNaoDeletadosPorEmpresa(idEmpresa);
-            long novosContratos = contratos.stream()
-                    .filter(c -> !isCancelado(c))
-                    .filter(c -> {
-                        LocalDate criacao = c.getDataCriacao() != null
-                                ? c.getDataCriacao().toLocalDate()
-                                : c.getDataVenda();
-                        if (criacao == null) return false;
-                        return (!criacao.isBefore(start3) && !criacao.isAfter(end));
-                    })
-                    .count();
-            resumo.setMediaNovosContratosUnidades3m(novosContratos / 3d);
-        } catch (Exception e) {
-            log.warn("Falha ao calcular KPIs de novos contratos/custos via DFC", e);
-        }
+            // Receita média dos últimos 3 meses (proxy para novos contratos em R$ no contexto atual)
+            double receitas3m = mov3.stream()
+                    .filter(m -> Boolean.FALSE.equals(m.getDebito()))
+                    .mapToDouble(m -> m.getValor() != null ? m.getValor().doubleValue() : 0d)
+                    .sum();
+            resumo.setMediaNovosContratosReais3m(receitas3m / 3d);
 
-        try {
-            // Custos médios (últimos 6 meses)
-            DfcResponseDTO dfcCustos6m = syncService.gerarDFCDoDb(start6, end, idEmpresa);
-            if (dfcCustos6m != null && dfcCustos6m.getIndicadores() != null) {
-                var ind = dfcCustos6m.getIndicadores();
-                resumo.setMediaCustoFixo(ind.getCustosOperacionais() / 6d);
-                resumo.setMediaCustoVariavel(ind.getDespesasOperacionais() / 6d);
-                resumo.setMediaCustoEstrategico(ind.getAtividadesEstrategicas() / 6d);
+            // Custos médios 6m por heurística de categoria/descrição
+            double somaFixo = 0d;
+            double somaVariavel = 0d;
+            double somaEstrategico = 0d;
+            double somaDespesas6m = 0d;
+            for (MovimentacaoFinanceira m : mov6) {
+                if (!Boolean.TRUE.equals(m.getDebito())) continue;
+                double valor = m.getValor() != null ? m.getValor().doubleValue() : 0d;
+                somaDespesas6m += valor;
+                String texto = textoClassificacao(m);
+                if (isCustoFixo(texto)) {
+                    somaFixo += valor;
+                } else if (isCustoEstrategico(texto)) {
+                    somaEstrategico += valor;
+                } else {
+                    somaVariavel += valor;
+                }
             }
 
-            // Financeiro/Investimento consolidado no período selecionado
-            LocalDate inicioSelecionado = (dataInicio != null) ? dataInicio : start6;
-            DfcResponseDTO dfcPeriodo = syncService.gerarDFCDoDb(inicioSelecionado, end, idEmpresa);
-            if (dfcPeriodo != null && dfcPeriodo.getIndicadores() != null) {
-                var indP = dfcPeriodo.getIndicadores();
-                resumo.setCustoFinanceiroInvestimento(indP.getInvestimentos() + indP.getFinanciamentos());
+            if (somaFixo == 0d && somaVariavel == 0d && somaEstrategico == 0d && somaDespesas6m > 0d) {
+                // fallback simples: classifica tudo como variável se não houver pistas
+                somaVariavel = somaDespesas6m;
             }
+            resumo.setMediaCustoFixo(somaFixo / 6d);
+            resumo.setMediaCustoVariavel(somaVariavel / 6d);
+            resumo.setMediaCustoEstrategico(somaEstrategico / 6d);
+
+            // Custo financeiro/investimento no período selecionado
+            double custoFinInv = movPeriodo.stream()
+                    .filter(m -> Boolean.TRUE.equals(m.getDebito()))
+                    .filter(m -> isFinanceiroInvestimento(textoClassificacao(m)))
+                    .mapToDouble(m -> m.getValor() != null ? m.getValor().doubleValue() : 0d)
+                    .sum();
+            resumo.setCustoFinanceiroInvestimento(custoFinInv);
         } catch (Exception e) {
-            log.warn("Falha ao calcular KPIs de custos/financeiro via DFC", e);
+            log.warn("Falha ao calcular KPIs financeiros do dashboard", e);
         }
 
         // =========================
@@ -177,6 +190,24 @@ public class DashboardKpiService {
             log.warn("Falha ao calcular KPIs de churn/LTV", e);
         }
 
+        // Novos contratos em unidades (média mensal últimos 3 meses)
+        try {
+            List<Contrato> contratos = contratoRepository.findAllNaoDeletadosPorEmpresa(idEmpresa);
+            long novosContratos = contratos.stream()
+                    .filter(c -> !isCancelado(c))
+                    .filter(c -> {
+                        LocalDate criacao = c.getDataCriacao() != null
+                                ? c.getDataCriacao().toLocalDate()
+                                : c.getDataVenda();
+                        if (criacao == null) return false;
+                        return (!criacao.isBefore(start3) && !criacao.isAfter(end));
+                    })
+                    .count();
+            resumo.setMediaNovosContratosUnidades3m(novosContratos / 3d);
+        } catch (Exception e) {
+            log.warn("Falha ao calcular KPI de novos contratos (unidades)", e);
+        }
+
         // =========================
         // Inadimplência
         // =========================
@@ -211,6 +242,47 @@ public class DashboardKpiService {
         } catch (Exception e) {
             log.warn("Falha ao calcular KPIs de inadimplência", e);
         }
+    }
+
+    private void inicializarComZero(ResumoFinanceiroDTO resumo) {
+        resumo.setMediaNovosContratosReais3m(0d);
+        resumo.setMediaNovosContratosUnidades3m(0d);
+        resumo.setCustoFinanceiroInvestimento(0d);
+        resumo.setMediaCustoFixo(0d);
+        resumo.setMediaCustoVariavel(0d);
+        resumo.setMediaCustoEstrategico(0d);
+        resumo.setTotalClientesAtivos(0d);
+        resumo.setChurnPercent(0d);
+        resumo.setLtvMeses(0d);
+        resumo.setInadimplenciaValor(0d);
+        resumo.setInadimplenciaTaxa(0d);
+    }
+
+    private String textoClassificacao(MovimentacaoFinanceira m) {
+        String categoria = m.getNomeCategoriaFinanceira() != null ? m.getNomeCategoriaFinanceira() : "";
+        String tipo = m.getNomeTipoMovimentacao() != null ? m.getNomeTipoMovimentacao() : "";
+        String nome = m.getNome() != null ? m.getNome() : "";
+        return (categoria + " " + tipo + " " + nome).toLowerCase();
+    }
+
+    private boolean isCustoFixo(String texto) {
+        return containsAny(texto, "aluguel", "salario", "folha", "pro-labore", "prolabore", "internet", "energia", "contabilidade", "plano", "assinatura");
+    }
+
+    private boolean isCustoEstrategico(String texto) {
+        return containsAny(texto, "marketing", "trafe", "tráfe", "ads", "consultoria", "branding", "estrateg", "evento", "treinamento");
+    }
+
+    private boolean isFinanceiroInvestimento(String texto) {
+        return containsAny(texto, "juros", "tarifa", "iof", "financi", "emprest", "invest", "aplicacao", "aplicação", "capital");
+    }
+
+    private boolean containsAny(String texto, String... termos) {
+        if (texto == null || texto.isBlank()) return false;
+        for (String t : termos) {
+            if (texto.contains(t)) return true;
+        }
+        return false;
     }
 
     private boolean isCancelado(Contrato c) {

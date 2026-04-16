@@ -31,7 +31,6 @@ public class UsuarioEmpresaService {
 
     private final EmpresaUsuarioRepository empresaUsuarioRepository;
     private final UsuarioRepository usuarioRepository;
-    private final BomControleService bomControleService;
 
     /**
      * Obtém todas as empresas que um usuário tem acesso (ativas)
@@ -108,10 +107,10 @@ public class UsuarioEmpresaService {
             throw new IllegalArgumentException("Usuário já tem acesso a esta empresa");
         }
         
-        // Se nomeEmpresa não foi informado, busca do BOMControle
+        // Se nomeEmpresa não foi informado, usa placeholder simples; em um ERP próprio,
+        // o ideal é validar contra tabela de empresas do próprio sistema.
         if (nomeEmpresa == null || nomeEmpresa.isBlank()) {
-            nomeEmpresa = bomControleService.obterNomeEmpresa(idEmpresa)
-                    .orElse("Empresa " + idEmpresa);
+            nomeEmpresa = "Empresa " + idEmpresa;
         }
         
         // Lógica automática de empresa padrão
@@ -245,12 +244,15 @@ public class UsuarioEmpresaService {
             }
         });
         
-        // Busca empresas do BOMControle para complementar nomes
-        Map<Integer, String> empresasCache = bomControleService.obterTodasAsEmpresas()
-                .stream()
+        // Monta um cache de nomes a partir do que já existe no banco (EmpresaUsuario).
+        // Em um ERP próprio, o ideal é existir uma tabela de Empresas e buscarmos o nome por lá.
+        Map<Integer, String> empresasCache = empresasAtuais.stream()
+                .filter(eu -> eu.getIdEmpresa() != null)
+                .filter(eu -> eu.getNomeEmpresa() != null && !eu.getNomeEmpresa().isBlank())
                 .collect(Collectors.toMap(
-                        emp -> ((Number) emp.get("Id")).intValue(),
-                        emp -> (String) emp.getOrDefault("Nome", "")
+                        EmpresaUsuario::getIdEmpresa,
+                        EmpresaUsuario::getNomeEmpresa,
+                        (a, b) -> a
                 ));
         
         // Adiciona/ativa empresas novas

@@ -77,4 +77,14 @@ public interface MovimentacaoFinanceiraRepository extends JpaRepository<Moviment
 
     long countByIdEmpresaAndDataVencimentoBetween(
             Integer idEmpresa, LocalDate dataInicio, LocalDate dataTermino);
+
+    // ── Empresas (para telas de acessos/config) ───────────────────────────────
+
+    @Query("""
+           SELECT DISTINCT m.idEmpresa, m.nomeEmpresa
+           FROM MovimentacaoFinanceira m
+           WHERE m.nomeEmpresa IS NOT NULL
+           ORDER BY m.nomeEmpresa
+           """)
+    List<Object[]> listarEmpresasDistinct();
 }

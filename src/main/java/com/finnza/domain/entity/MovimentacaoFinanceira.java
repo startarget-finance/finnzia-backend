@@ -10,8 +10,7 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 
 /**
- * Espelho local das movimentações financeiras do Bom Controle.
- * Populado pelo BomControleSyncService para evitar rate limit em tempo real.
+ * Movimentação financeira persistida no ERP.
  */
 @Entity
 @Table(
@@ -30,10 +29,10 @@ import java.time.LocalDateTime;
 @Builder
 public class MovimentacaoFinanceira {
 
-    /** ID original no Bom Controle (IdMovimentacaoFinanceiraParcela) */
+    /** ID da movimentação (compatível com o frontend atual). */
     @Id
     @Column(name = "id_bom_controle", nullable = false)
-    private String idBomControle;
+    private String idMovimentacao;
 
     @Column(name = "id_empresa", nullable = false)
     private Integer idEmpresa;

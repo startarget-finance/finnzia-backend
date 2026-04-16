@@ -101,6 +101,13 @@
             <artifactId>lombok</artifactId>
             <optional>true</optional>
         </dependency>
+
+        <!-- OFX parsing (importação de extrato bancário) -->
+        <dependency>
+            <groupId>com.webcohesion.ofx4j</groupId>
+            <artifactId>ofx4j</artifactId>
+            <version>1.38</version>
+        </dependency>
         
         <!-- Spring Boot Test -->
         <dependency>

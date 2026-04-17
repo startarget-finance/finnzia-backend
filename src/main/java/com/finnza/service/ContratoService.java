@@ -10,11 +10,15 @@ import com.finnza.dto.response.ContratoDTO;
 import com.finnza.repository.ClienteRepository;
 import com.finnza.repository.ContratoRepository;
 import com.finnza.repository.CobrancaRepository;
+import com.finnza.service.UsuarioEmpresaService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.Pageable;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -46,6 +50,9 @@ public class ContratoService {
 
     @Autowired
     private AsaasService asaasService;
+
+    @Autowired
+    private UsuarioEmpresaService usuarioEmpresaService;
 
     /**
      * Cria um novo contrato
@@ -101,7 +108,7 @@ public class ContratoService {
      */
     @Transactional
     public Page<ContratoDTO> listarTodos(Pageable pageable) {
-        Integer idEmpresa = EmpresaContextHolder.getIdEmpresa();
+        Integer idEmpresa = resolverIdEmpresaContexto();
         if (idEmpresa == null) {
             return Page.empty(pageable);
         }
@@ -139,7 +146,7 @@ public class ContratoService {
      */
     @Transactional
     public Page<ContratoDTO> buscarPorCliente(Long clienteId, Pageable pageable) {
-        Integer idEmpresa = EmpresaContextHolder.getIdEmpresa();
+        Integer idEmpresa = resolverIdEmpresaContexto();
         if (idEmpresa == null) {
             return Page.empty(pageable);
         }
@@ -155,7 +162,7 @@ public class ContratoService {
      */
     @Transactional
     public Page<ContratoDTO> buscarPorStatus(Contrato.StatusContrato status, Pageable pageable) {
-        Integer idEmpresa = EmpresaContextHolder.getIdEmpresa();
+        Integer idEmpresa = resolverIdEmpresaContexto();
         if (idEmpresa == null) {
             return Page.empty(pageable);
         }
@@ -183,7 +190,7 @@ public class ContratoService {
             String financialStatus,
             Pageable pageable) {
         
-        Integer idEmpresa = EmpresaContextHolder.getIdEmpresa();
+        Integer idEmpresa = resolverIdEmpresaContexto();
         if (idEmpresa == null) {
             return Page.empty(pageable);
         }
@@ -1135,7 +1142,7 @@ public class ContratoService {
      */
     @Transactional(readOnly = true)
     public Map<String, Object> getTotaisPorCategoria() {
-        Integer idEmpresa = EmpresaContextHolder.getIdEmpresa();
+        Integer idEmpresa = resolverIdEmpresaContexto();
         if (idEmpresa == null) {
             Map<String, Object> vazio = new java.util.HashMap<>();
             vazio.put("totalContratos", 0L);
@@ -1206,7 +1213,7 @@ public class ContratoService {
      */
     @Transactional
     public Map<String, Object> sincronizarTodosComAsaas() {
-        Integer idEmpresa = EmpresaContextHolder.getIdEmpresa();
+        Integer idEmpresa = resolverIdEmpresaContexto();
         if (idEmpresa == null) {
             Map<String, Object> vazio = new java.util.HashMap<>();
             vazio.put("totalContratos", 0);
@@ -1354,8 +1361,10 @@ public class ContratoService {
                         continue;
                     }
                     
-                    // Verificar se já existe contrato com essa assinatura
-                    Optional<Contrato> contratoExistente = contratoRepository.findByAsaasSubscriptionId(subscriptionId);
+                    // Verificar se já existe contrato com essa assinatura na empresa atual.
+                    Integer idEmpresaAtual = resolverIdEmpresaContexto();
+                    Optional<Contrato> contratoExistente = contratoRepository
+                            .findByAsaasSubscriptionIdAndEmpresa(subscriptionId, idEmpresaAtual);
                     if (contratoExistente.isPresent()) {
                         log.debug("Contrato já existe para subscriptionId: {} (ID: {})", 
                                 subscriptionId, contratoExistente.get().getId());
@@ -1702,6 +1711,12 @@ public class ContratoService {
             List<Contrato> baldeExistente = contratoRepository.findContratosAvulsosAgregaveisCliente(
                     cliente.getId(), idEmpresa, PageRequest.of(0, 1));
 
+            // Proteção extra contra corrida/reimportação simultânea.
+            if (cobrancaRepository.findByAsaasPaymentId(paymentId).isPresent()) {
+                log.debug("Cobrança {} já existe no banco, ignorando importação duplicada.", paymentId);
+                return true;
+            }
+
             Contrato contrato;
             if (!baldeExistente.isEmpty()) {
                 contrato = baldeExistente.get(0);
@@ -1740,7 +1755,15 @@ public class ContratoService {
                 contrato.setDataVencimento(proxVenc != null ? proxVenc : contrato.getDataVencimento());
 
                 contrato.calcularStatusBaseadoNasCobrancas();
-                contratoRepository.save(contrato);
+                try {
+                    contratoRepository.save(contrato);
+                } catch (DataIntegrityViolationException e) {
+                    if (cobrancaRepository.findByAsaasPaymentId(paymentId).isPresent()) {
+                        log.debug("Cobrança {} já foi importada por outra execução, seguindo fluxo.", paymentId);
+                        return true;
+                    }
+                    throw e;
+                }
 
                 log.info("✓ Cobrança avulsa agregada ao contrato {} (parcela {}): PaymentId={}, Cliente={}",
                         contrato.getId(), nextParcela, paymentId, cliente.getRazaoSocial());
@@ -1774,7 +1797,15 @@ public class ContratoService {
 
             contrato.adicionarCobranca(cobranca);
             contrato.calcularStatusBaseadoNasCobrancas();
-            contratoRepository.save(contrato);
+            try {
+                contratoRepository.save(contrato);
+            } catch (DataIntegrityViolationException e) {
+                if (cobrancaRepository.findByAsaasPaymentId(paymentId).isPresent()) {
+                    log.debug("Cobrança {} já foi importada por outra execução, seguindo fluxo.", paymentId);
+                    return true;
+                }
+                throw e;
+            }
 
             log.info("✓ Cobrança avulsa importada: contrato={}, PaymentId={}, Status={}, Cliente={}",
                     contrato.getId(), paymentId, statusStr, cliente.getRazaoSocial());
@@ -1815,6 +1846,29 @@ public class ContratoService {
                 totalContratos, totalCobrancas);
         
         return (int) totalContratos;
+    }
+
+    /**
+     * Resolve a empresa no modo single-tenant quando o header X-Empresa-Id não vem.
+     */
+    private Integer resolverIdEmpresaContexto() {
+        Integer idEmpresa = EmpresaContextHolder.getIdEmpresa();
+        if (idEmpresa != null && idEmpresa > 0) {
+            return idEmpresa;
+        }
+
+        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+        if (auth != null && auth.isAuthenticated()) {
+            Integer empresaPadrao = usuarioEmpresaService.obterIdEmpresaPadraoPorEmail(auth.getName()).orElse(null);
+            if (empresaPadrao != null && empresaPadrao > 0) {
+                return empresaPadrao;
+            }
+        }
+
+        return contratoRepository.findFirstByIdEmpresaIsNotNullOrderByIdEmpresaAsc()
+                .map(Contrato::getIdEmpresa)
+                .filter(v -> v != null && v > 0)
+                .orElse(null);
     }
 }
 

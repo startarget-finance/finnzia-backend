@@ -11,6 +11,7 @@ import org.springframework.stereotype.Repository;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.util.List;
+import java.util.Optional;
 
 @Repository
 public interface MovimentacaoFinanceiraRepository extends JpaRepository<MovimentacaoFinanceira, String> {
@@ -87,4 +88,9 @@ public interface MovimentacaoFinanceiraRepository extends JpaRepository<Moviment
            ORDER BY m.nomeEmpresa
            """)
     List<Object[]> listarEmpresasDistinct();
+
+    /**
+     * Fluxo single-tenant: usa o primeiro ID de empresa disponível mesmo quando o nome estiver nulo.
+     */
+    Optional<MovimentacaoFinanceira> findFirstByIdEmpresaIsNotNullOrderByIdEmpresaAsc();
 }

@@ -410,6 +410,38 @@ public class UsuarioEmpresaService {
         return usuarioOpt.get().getRole() == Usuario.Role.ADMIN;
     }
 
+    /**
+     * Informa se o usuário possui ao menos uma empresa ativa vinculada.
+     */
+    @Transactional(readOnly = true)
+    public boolean usuarioTemEmpresasAtivasPorEmail(String email) {
+        if (email == null || email.isBlank()) {
+            return false;
+        }
+        Optional<Usuario> usuarioOpt = usuarioRepository.findByEmail(email);
+        if (usuarioOpt.isEmpty()) {
+            return false;
+        }
+        return empresaUsuarioRepository.usuarioTemEmpresasAtivas(usuarioOpt.get().getId());
+    }
+
+    /**
+     * Obtém o ID da empresa padrão do usuário pelo email.
+     */
+    @Transactional(readOnly = true)
+    public Optional<Integer> obterIdEmpresaPadraoPorEmail(String email) {
+        if (email == null || email.isBlank()) {
+            return Optional.empty();
+        }
+        Optional<Usuario> usuarioOpt = usuarioRepository.findByEmail(email);
+        if (usuarioOpt.isEmpty()) {
+            return Optional.empty();
+        }
+        return empresaUsuarioRepository.findEmpresaPadraoByUsuarioId(usuarioOpt.get().getId())
+                .map(EmpresaUsuario::getIdEmpresa)
+                .filter(id -> id != null && id > 0);
+    }
+
 
     private Usuario validarUsuarioExiste(Long usuarioId) {
         if (usuarioId == null || usuarioId <= 0) {

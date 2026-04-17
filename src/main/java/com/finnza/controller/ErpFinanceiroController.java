@@ -16,13 +16,18 @@ import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.time.LocalDateTime;
 import java.time.LocalDate;
+import java.util.List;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
  * Endpoints financeiros do ERP (substitui integração Bom Controle).
  *
- * Requer header X-Empresa-Id para usuários não-admin.
+ * Fluxo atual: single-tenant por login.
+ * O header X-Empresa-Id continua suportado, mas quando ausente o sistema tenta:
+ * 1) empresa padrão do usuário, 2) primeira empresa disponível nas movimentações.
  */
 @Slf4j
 @RestController
@@ -57,11 +62,100 @@ public class ErpFinanceiroController {
         }
         String email = auth.getName();
         try {
+            // Se o usuário não tem vínculos em empresa_usuario (modo single-tenant),
+            // não bloquear o acesso por ausência de mapeamento legado.
+            if (!usuarioEmpresaService.usuarioTemEmpresasAtivasPorEmail(email)) {
+                return true;
+            }
             return usuarioEmpresaService.validarAcessoUsuarioEmpresa(email, empresaId);
         } catch (Exception e) {
             log.error("❌ Erro ao validar acesso à empresa {} para usuário {}:", empresaId, email, e);
             return false;
         }
+    }
+
+    private Integer resolverEmpresaId(String headerEmpresaId) {
+        Integer idEmpresa = extrairEmpresaDoHeader(headerEmpresaId);
+        if (idEmpresa != null) {
+            return idEmpresa;
+        }
+        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+        if (auth != null && auth.isAuthenticated()) {
+            String email = auth.getName();
+            Integer empresaPadrao = usuarioEmpresaService.obterIdEmpresaPadraoPorEmail(email).orElse(null);
+            if (empresaPadrao != null && empresaPadrao > 0) {
+                return empresaPadrao;
+            }
+        }
+        return erpFinanceiroService.obterPrimeiraEmpresaDisponivelId().orElse(null);
+    }
+
+    private ResumoFinanceiroDTO resumoVazio(LocalDate inicio, LocalDate fim) {
+        return ResumoFinanceiroDTO.builder()
+                .periodo(ResumoFinanceiroDTO.PeriodoResumo.builder()
+                        .dataInicio(inicio.toString())
+                        .dataTermino(fim.toString())
+                        .build())
+                .contasReceber(ResumoFinanceiroDTO.BlocoResumo.builder()
+                        .totalGeral(0)
+                        .totalLiquidado(0)
+                        .totalPendente(0)
+                        .totalContas(0)
+                        .contasPendentes(0)
+                        .build())
+                .contasPagar(ResumoFinanceiroDTO.BlocoResumo.builder()
+                        .totalGeral(0)
+                        .totalLiquidado(0)
+                        .totalPendente(0)
+                        .totalContas(0)
+                        .contasPendentes(0)
+                        .build())
+                .saldoDisponivel(0)
+                .saldoProjetado(0)
+                .totalMovimentacoes(0)
+                .usandoCache(false)
+                .fonteDados("erp-db")
+                .atualizadoEm(LocalDateTime.now().toString())
+                .fallbackAtivo(true)
+                .fallbackMetadata(Map.of("mensagem", "Sem movimentações para a empresa no período"))
+                .build();
+    }
+
+    private DfcResponseDTO dfcVazio(LocalDate inicio, LocalDate fim) {
+        return DfcResponseDTO.builder()
+                .periodo(DfcResponseDTO.Periodo.builder()
+                        .dataInicio(inicio.toString())
+                        .dataTermino(fim.toString())
+                        .build())
+                .meses(List.of())
+                .linhas(List.of())
+                .indicadores(DfcResponseDTO.Indicadores.builder()
+                        .faturamentoNovosContratos(0)
+                        .receitasOperacionais(0)
+                        .outrasEntradas(0)
+                        .custosOperacionais(0)
+                        .despesasOperacionais(0)
+                        .atividadesEstrategicas(0)
+                        .investimentos(0)
+                        .financiamentos(0)
+                        .totalReceitas(0)
+                        .totalDespesas(0)
+                        .resultado(0)
+                        .margemPercentual(0)
+                        .ticketMedio(0)
+                        .burnRateMensal(0)
+                        .build())
+                .fonteDados("erp-db")
+                .fallbackAtivo(true)
+                .fallbackMetadata(Map.of("mensagem", "Sem movimentações para a empresa no período"))
+                .totalMovimentacoesProcessadas(0)
+                .totalMovimentacoesDisponiveis(0)
+                .paginasProcessadas(0)
+                .paginasEstimadas(0)
+                .tempoProcessamentoMs(0)
+                .usandoCache(false)
+                .atualizadoEm(LocalDateTime.now().toString())
+                .build();
     }
 
     @GetMapping("/movimentacoes")
@@ -78,32 +172,41 @@ public class ErpFinanceiroController {
             @RequestParam(required = false, defaultValue = "50") Integer itensPorPagina,
             @RequestParam(required = false, defaultValue = "1") Integer numeroDaPagina
     ) {
-        Integer idEmpresa = extrairEmpresaDoHeader(headerEmpresaId);
-
-        if (idEmpresa == null) {
-            Authentication auth = SecurityContextHolder.getContext().getAuthentication();
-            if (auth != null && auth.isAuthenticated()) {
-                String email = auth.getName();
-                if (!usuarioEmpresaService.isAdmin(email)) {
-                    return ResponseEntity.badRequest().body(Map.of(
-                            "erro", true,
-                            "mensagem", "X-Empresa-Id header é obrigatório para esta requisição"
-                    ));
-                }
-            }
-        } else if (!validarAcessoEmpresa(idEmpresa)) {
-            return ResponseEntity.status(403).body(Map.of(
-                    "erro", true,
-                    "mensagem", "Você não tem permissão de acessar esta empresa"
-            ));
-        }
-
         LocalDate inicio = dataInicio;
         LocalDate fim = dataTermino;
         if (inicio == null || fim == null) {
             LocalDate hoje = LocalDate.now();
             if (inicio == null) inicio = hoje.withDayOfMonth(1);
             if (fim == null) fim = hoje.withDayOfMonth(hoje.lengthOfMonth());
+        }
+
+        Integer idEmpresa = resolverEmpresaId(headerEmpresaId);
+
+        if (idEmpresa == null) {
+            Map<String, Object> resultado = new LinkedHashMap<>();
+            resultado.put("movimentacoes", List.of());
+            resultado.put("total", 0);
+            resultado.put("totalReceitas", 0.0);
+            resultado.put("totalDespesas", 0.0);
+            resultado.put("saldoLiquido", 0.0);
+            resultado.put("dataInicio", inicio.toString());
+            resultado.put("dataTermino", fim.toString());
+            resultado.put("tipoData", tipoData != null ? tipoData : "DataVencimento");
+            resultado.put("endpointUsado", "erp-db");
+            resultado.put("fonteDados", "erp-db");
+            resultado.put("usandoCache", false);
+            resultado.put("atualizadoEm", LocalDateTime.now().toString());
+            resultado.put("paginacao", Map.of(
+                    "itensPorPagina", itensPorPagina,
+                    "numeroDaPagina", numeroDaPagina,
+                    "totalItens", 0
+            ));
+            return ResponseEntity.ok(resultado);
+        } else if (!validarAcessoEmpresa(idEmpresa)) {
+            return ResponseEntity.status(403).body(Map.of(
+                    "erro", true,
+                    "mensagem", "Você não tem permissão de acessar esta empresa"
+            ));
         }
 
         Boolean debitoFiltro = null;
@@ -133,14 +236,8 @@ public class ErpFinanceiroController {
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate dataInicio,
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate dataTermino
     ) {
-        Integer idEmpresa = extrairEmpresaDoHeader(headerEmpresaId);
-        if (idEmpresa == null) {
-            return ResponseEntity.badRequest().body(Map.of(
-                    "erro", true,
-                    "mensagem", "X-Empresa-Id header é obrigatório para esta requisição"
-            ));
-        }
-        if (!validarAcessoEmpresa(idEmpresa)) {
+        Integer idEmpresa = resolverEmpresaId(headerEmpresaId);
+        if (idEmpresa != null && !validarAcessoEmpresa(idEmpresa)) {
             return ResponseEntity.status(403).body(Map.of(
                     "erro", true,
                     "mensagem", "Você não tem permissão de acessar esta empresa"
@@ -155,6 +252,9 @@ public class ErpFinanceiroController {
             if (fim == null) fim = hoje.withDayOfMonth(hoje.lengthOfMonth());
         }
 
+        if (idEmpresa == null) {
+            return ResponseEntity.ok(resumoVazio(inicio, fim));
+        }
         ResumoFinanceiroDTO resumo = erpFinanceiroService.gerarResumo(inicio, fim, idEmpresa);
         return ResponseEntity.ok(resumo);
     }
@@ -172,12 +272,9 @@ public class ErpFinanceiroController {
             @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate dataInicio,
             @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate dataTermino
     ) {
-        Integer idEmpresa = extrairEmpresaDoHeader(headerEmpresaId);
+        Integer idEmpresa = resolverEmpresaId(headerEmpresaId);
         if (idEmpresa == null) {
-            return ResponseEntity.badRequest().body(Map.of(
-                    "erro", true,
-                    "mensagem", "X-Empresa-Id header é obrigatório para esta requisição"
-            ));
+            return ResponseEntity.ok(dfcVazio(dataInicio, dataTermino));
         }
         if (!validarAcessoEmpresa(idEmpresa)) {
             return ResponseEntity.status(403).body(Map.of(
@@ -196,11 +293,11 @@ public class ErpFinanceiroController {
             @RequestParam(value = "tipo", required = false, defaultValue = "MANUAL") String tipo,
             @RequestPart("file") MultipartFile file
     ) {
-        Integer idEmpresa = extrairEmpresaDoHeader(headerEmpresaId);
+        Integer idEmpresa = resolverEmpresaId(headerEmpresaId);
         if (idEmpresa == null) {
             return ResponseEntity.badRequest().body(Map.of(
                     "erro", true,
-                    "mensagem", "X-Empresa-Id header é obrigatório para esta requisição"
+                    "mensagem", "Não foi possível identificar a empresa para esta requisição"
             ));
         }
         if (!validarAcessoEmpresa(idEmpresa)) {
@@ -246,11 +343,11 @@ public class ErpFinanceiroController {
             @RequestParam(required = false) String tipo,
             @RequestParam(required = false) String conta
     ) {
-        Integer idEmpresa = extrairEmpresaDoHeader(headerEmpresaId);
+        Integer idEmpresa = resolverEmpresaId(headerEmpresaId);
         if (idEmpresa == null) {
-            return ResponseEntity.badRequest().body(Map.of(
-                    "erro", true,
-                    "mensagem", "X-Empresa-Id header é obrigatório para esta requisição"
+            return ResponseEntity.ok(Map.of(
+                    "erro", false,
+                    "itens", List.of()
             ));
         }
         if (!validarAcessoEmpresa(idEmpresa)) {
@@ -271,11 +368,11 @@ public class ErpFinanceiroController {
             @RequestHeader(value = "X-Empresa-Id", required = false) String headerEmpresaId,
             @PathVariable("id") Long id
     ) {
-        Integer idEmpresa = extrairEmpresaDoHeader(headerEmpresaId);
+        Integer idEmpresa = resolverEmpresaId(headerEmpresaId);
         if (idEmpresa == null) {
             return ResponseEntity.badRequest().body(Map.of(
                     "erro", true,
-                    "mensagem", "X-Empresa-Id header é obrigatório para esta requisição"
+                    "mensagem", "Não foi possível identificar a empresa para esta requisição"
             ));
         }
         if (!validarAcessoEmpresa(idEmpresa)) {

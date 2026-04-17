@@ -19,6 +19,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.ArrayList;
+import java.util.Optional;
 import java.util.stream.Collectors;
 
 /**
@@ -179,6 +180,15 @@ public class ErpFinanceiroService {
         Map<String, Object> resposta = new LinkedHashMap<>();
         resposta.put("empresas", empresas);
         return resposta;
+    }
+
+    /**
+     * Fluxo single-tenant: retorna o primeiro ID de empresa disponível nas movimentações.
+     */
+    public Optional<Integer> obterPrimeiraEmpresaDisponivelId() {
+        return movimentacaoRepo.findFirstByIdEmpresaIsNotNullOrderByIdEmpresaAsc()
+                .map(MovimentacaoFinanceira::getIdEmpresa)
+                .filter(id -> id != null && id > 0);
     }
 
     /**

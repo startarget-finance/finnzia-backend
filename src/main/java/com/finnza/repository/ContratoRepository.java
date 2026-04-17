@@ -79,6 +79,20 @@ public interface ContratoRepository extends JpaRepository<Contrato, Long> {
     Optional<Contrato> findByAsaasSubscriptionId(@Param("asaasSubscriptionId") String asaasSubscriptionId);
 
     /**
+     * Busca contrato por assinatura do Asaas dentro da empresa do contexto.
+     */
+    @Query("SELECT c FROM Contrato c WHERE c.asaasSubscriptionId = :asaasSubscriptionId " +
+            "AND c.deleted = false AND (c.idEmpresa = :idEmpresa OR (c.idEmpresa IS NULL AND :idEmpresa IS NULL))")
+    Optional<Contrato> findByAsaasSubscriptionIdAndEmpresa(@Param("asaasSubscriptionId") String asaasSubscriptionId,
+                                                           @Param("idEmpresa") Integer idEmpresa);
+
+    /**
+     * Obtém o primeiro contrato com idEmpresa preenchido.
+     * Usado como fallback no modo single-tenant sem header X-Empresa-Id.
+     */
+    Optional<Contrato> findFirstByIdEmpresaIsNotNullOrderByIdEmpresaAsc();
+
+    /**
      * Contrato “balde” de cobranças avulsas (UNICO, sem assinatura Asaas) por cliente, para agrupar parcelas do mesmo cliente.
      */
     @Query("SELECT c FROM Contrato c WHERE c.cliente.id = :clienteId AND c.deleted = false AND "

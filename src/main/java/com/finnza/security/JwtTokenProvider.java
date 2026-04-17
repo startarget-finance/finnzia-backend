@@ -6,6 +6,7 @@ import io.jsonwebtoken.security.Keys;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.stereotype.Component;
+import jakarta.annotation.PostConstruct;
 
 import javax.crypto.SecretKey;
 import java.nio.charset.StandardCharsets;
@@ -20,11 +21,21 @@ import java.util.function.Function;
 @Component
 public class JwtTokenProvider {
 
-    @Value("${jwt.secret:mySecretKeyForFinnzaFinancialSystem2024SecureAndLong}")
+    @Value("${jwt.secret}")
     private String secret;
 
     @Value("${jwt.expiration:86400000}") // 24 horas em milissegundos
     private Long expiration;
+
+    @PostConstruct
+    void validateSecurityConfiguration() {
+        if (secret == null || secret.isBlank()) {
+            throw new IllegalStateException("Configuração obrigatória ausente: jwt.secret");
+        }
+        if (secret.length() < 32) {
+            throw new IllegalStateException("Configuração insegura: jwt.secret deve ter pelo menos 32 caracteres");
+        }
+    }
 
     /**
      * Gera a chave secreta para assinar o token

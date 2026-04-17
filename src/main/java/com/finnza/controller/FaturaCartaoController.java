@@ -1,6 +1,7 @@
 package com.finnza.controller;
 
 import com.finnza.service.FaturaCartaoService;
+import com.finnza.service.ErpFinanceiroService;
 import com.finnza.service.UsuarioEmpresaService;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
@@ -18,10 +19,15 @@ public class FaturaCartaoController {
 
     private final FaturaCartaoService faturaCartaoService;
     private final UsuarioEmpresaService usuarioEmpresaService;
+    private final ErpFinanceiroService erpFinanceiroService;
 
-    public FaturaCartaoController(FaturaCartaoService faturaCartaoService, UsuarioEmpresaService usuarioEmpresaService) {
+    public FaturaCartaoController(
+            FaturaCartaoService faturaCartaoService,
+            UsuarioEmpresaService usuarioEmpresaService,
+            ErpFinanceiroService erpFinanceiroService) {
         this.faturaCartaoService = faturaCartaoService;
         this.usuarioEmpresaService = usuarioEmpresaService;
+        this.erpFinanceiroService = erpFinanceiroService;
     }
 
     @GetMapping("/cartoes")
@@ -31,7 +37,7 @@ public class FaturaCartaoController {
             @RequestParam(required = false) Integer idsEmpresa) {
         Integer empresaFinal = extrairEmpresa(headerEmpresaId, idsEmpresa);
         if (empresaFinal == null) {
-            return ResponseEntity.badRequest().body(Map.of("erro", true, "mensagem", "X-Empresa-Id e obrigatorio."));
+            return ResponseEntity.ok(Map.of("cartoes", List.of()));
         }
         if (!validarAcessoEmpresa(empresaFinal)) {
             return ResponseEntity.status(403).body(Map.of("erro", true, "mensagem", "Sem permissao para empresa."));
@@ -74,13 +80,28 @@ public class FaturaCartaoController {
             } catch (Exception ignored) {
             }
         }
-        return idsEmpresa;
+        if (idsEmpresa != null && idsEmpresa > 0) {
+            return idsEmpresa;
+        }
+        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+        if (auth == null || !auth.isAuthenticated()) {
+            return null;
+        }
+        String email = auth.getName();
+        Integer empresaPadrao = usuarioEmpresaService.obterIdEmpresaPadraoPorEmail(email).orElse(null);
+        if (empresaPadrao != null && empresaPadrao > 0) {
+            return empresaPadrao;
+        }
+        return erpFinanceiroService.obterPrimeiraEmpresaDisponivelId().orElse(null);
     }
 
     private boolean validarAcessoEmpresa(Integer empresaId) {
         Authentication auth = SecurityContextHolder.getContext().getAuthentication();
         if (auth == null || !auth.isAuthenticated()) return false;
         String email = auth.getName();
+        if (!usuarioEmpresaService.usuarioTemEmpresasAtivasPorEmail(email)) {
+            return true;
+        }
         return usuarioEmpresaService.validarAcessoUsuarioEmpresa(email, empresaId);
     }
 }

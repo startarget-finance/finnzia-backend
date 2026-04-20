@@ -49,6 +49,21 @@ public class EmpresaConfig {
     @Column(name = "asaas_base_url", length = 255)
     private String asaasBaseUrl;
 
+    @Column(name = "cnpj", length = 14)
+    private String cnpj;
+
+    @Column(name = "razao_social", length = 255)
+    private String razaoSocial;
+
+    @Column(name = "nome_fantasia", length = 255)
+    private String nomeFantasia;
+
+    @Column(name = "email_empresa", length = 255)
+    private String emailEmpresa;
+
+    @Column(name = "telefone_empresa", length = 40)
+    private String telefoneEmpresa;
+
     @CreatedDate
     @Column(name = "data_criacao", nullable = false, updatable = false)
     private LocalDateTime dataCriacao;

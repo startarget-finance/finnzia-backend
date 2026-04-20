@@ -1331,8 +1331,10 @@ public class ContratoService {
         }
 
         int contratosImportados = 0;
+        int contratosAtualizados = 0;
         int assinaturasProcessadas = 0;
         int cobrancasProcessadas = 0;
+        int cobrancasAtualizadas = 0;
         int erros = 0;
 
         try {
@@ -1366,8 +1368,16 @@ public class ContratoService {
                     Optional<Contrato> contratoExistente = contratoRepository
                             .findByAsaasSubscriptionIdAndEmpresa(subscriptionId, idEmpresaAtual);
                     if (contratoExistente.isPresent()) {
-                        log.debug("Contrato já existe para subscriptionId: {} (ID: {})", 
-                                subscriptionId, contratoExistente.get().getId());
+                        Contrato existente = contratoExistente.get();
+                        boolean atualizou = atualizarContratoRecorrenteExistente(existente, assinatura);
+                        if (atualizou) {
+                            contratosAtualizados++;
+                            log.info("Contrato recorrente atualizado para subscriptionId: {} (ID: {})",
+                                    subscriptionId, existente.getId());
+                        } else {
+                            log.debug("Contrato já existe para subscriptionId: {} (ID: {})",
+                                    subscriptionId, existente.getId());
+                        }
                         continue;
                     }
 
@@ -1415,8 +1425,11 @@ public class ContratoService {
                 }
             }
             
-            log.info("Assinaturas processadas: {} importadas, {} erros, {} já existiam", 
-                    contratosImportados, erros, assinaturasProcessadas - contratosImportados - erros);
+            log.info("Assinaturas processadas: {} importadas, {} atualizadas, {} erros, {} já existiam sem mudanças",
+                    contratosImportados,
+                    contratosAtualizados,
+                    erros,
+                    Math.max(0, assinaturasProcessadas - contratosImportados - contratosAtualizados - erros));
 
             // Buscar cobranças únicas (payments) do Asaas
             // IMPORTANTE: Pular cobranças que pertencem a uma assinatura (já foram importadas no passo anterior)
@@ -1456,8 +1469,13 @@ public class ContratoService {
                     // Verificar se já existe cobrança com esse paymentId
                     Optional<Cobranca> cobrancaExistente = cobrancaRepository.findByAsaasPaymentId(paymentId);
                     if (cobrancaExistente.isPresent()) {
-                        log.debug("Cobrança já existe para paymentId: {} (ID: {})", 
-                                paymentId, cobrancaExistente.get().getId());
+                        boolean atualizou = atualizarCobrancaExistenteImportada(cobrancaExistente.get(), cobrancaAsaas);
+                        if (atualizou) {
+                            cobrancasAtualizadas++;
+                        } else {
+                            log.debug("Cobrança já existe para paymentId: {} (ID: {})",
+                                    paymentId, cobrancaExistente.get().getId());
+                        }
                         continue;
                     }
 
@@ -1485,6 +1503,8 @@ public class ContratoService {
                     boolean sucesso = criarContratoUnicoImportado(cobrancaAsaas, cliente, paymentId);
                     if (sucesso) {
                         contratosImportados++;
+                    } else {
+                        erros++;
                     }
                 } catch (Exception e) {
                     erros++;
@@ -1496,14 +1516,182 @@ public class ContratoService {
 
             log.info("=== IMPORTAÇÃO CONCLUÍDA ===");
             log.info("Total de contratos importados: {}", contratosImportados);
+            log.info("Total de contratos atualizados: {}", contratosAtualizados);
             log.info("Assinaturas processadas: {}", assinaturasProcessadas);
             log.info("Cobranças processadas: {}", cobrancasProcessadas);
+            log.info("Cobranças atualizadas: {}", cobrancasAtualizadas);
             log.info("Erros encontrados: {}", erros);
             
             return contratosImportados;
         } catch (Exception e) {
             log.error("Erro ao importar contratos do Asaas", e);
             throw new RuntimeException("Erro ao importar contratos do Asaas: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Atualiza uma cobrança já existente com os dados mais recentes vindos do Asaas.
+     */
+    @Transactional(propagation = org.springframework.transaction.annotation.Propagation.REQUIRES_NEW)
+    private boolean atualizarCobrancaExistenteImportada(Cobranca cobranca, Map<String, Object> cobrancaAsaas) {
+        boolean alterou = false;
+
+        Object valorObj = cobrancaAsaas.get("value");
+        BigDecimal valor = valorObj != null ? new BigDecimal(valorObj.toString()) : null;
+        if (valor != null && (cobranca.getValor() == null || cobranca.getValor().compareTo(valor) != 0)) {
+            cobranca.setValor(valor);
+            alterou = true;
+        }
+
+        Object dueDateObj = cobrancaAsaas.get("dueDate");
+        if (dueDateObj != null) {
+            String dateStr = dueDateObj.toString();
+            if (dateStr.length() >= 10) {
+                LocalDate dueDate = LocalDate.parse(dateStr.substring(0, 10));
+                if (!Objects.equals(cobranca.getDataVencimento(), dueDate)) {
+                    cobranca.setDataVencimento(dueDate);
+                    alterou = true;
+                }
+            }
+        }
+
+        Object paymentDateObj = cobrancaAsaas.get("paymentDate");
+        LocalDate paymentDate = null;
+        if (paymentDateObj != null) {
+            String dateStr = paymentDateObj.toString();
+            if (dateStr.length() >= 10) {
+                paymentDate = LocalDate.parse(dateStr.substring(0, 10));
+            }
+        }
+        if (!Objects.equals(cobranca.getDataPagamento(), paymentDate)) {
+            cobranca.setDataPagamento(paymentDate);
+            alterou = true;
+        }
+
+        String statusStr = (String) cobrancaAsaas.get("status");
+        Cobranca.StatusCobranca novoStatus = mapearStatusCobranca(statusStr);
+        if (cobranca.getStatus() != novoStatus) {
+            cobranca.setStatus(novoStatus);
+            alterou = true;
+        }
+
+        String invoiceUrl = (String) cobrancaAsaas.get("invoiceUrl");
+        if (invoiceUrl != null && !invoiceUrl.isBlank() && !Objects.equals(cobranca.getLinkPagamento(), invoiceUrl)) {
+            cobranca.setLinkPagamento(invoiceUrl);
+            alterou = true;
+        }
+
+        String nossoNumero = (String) cobrancaAsaas.get("nossoNumero");
+        if (nossoNumero != null && !nossoNumero.isBlank() && !Objects.equals(cobranca.getCodigoBarras(), nossoNumero)) {
+            cobranca.setCodigoBarras(nossoNumero);
+            alterou = true;
+        }
+
+        if (alterou) {
+            cobrancaRepository.save(cobranca);
+            Contrato contrato = cobranca.getContrato();
+            if (contrato != null) {
+                contrato.calcularStatusBaseadoNasCobrancas();
+                contrato.setFinancialStatus(calcularFinancialStatus(contrato));
+                contratoRepository.save(contrato);
+            }
+        }
+
+        return alterou;
+    }
+
+    /**
+     * Atualiza um contrato recorrente já existente com os dados atuais do Asaas.
+     * Garante convergência entre ambientes ao reimportar: atualiza cabeçalho do contrato,
+     * importa cobranças faltantes e sincroniza status/valores.
+     */
+    @Transactional(propagation = org.springframework.transaction.annotation.Propagation.REQUIRES_NEW)
+    private boolean atualizarContratoRecorrenteExistente(Contrato contrato, Map<String, Object> assinatura) {
+        try {
+            boolean alterou = false;
+
+            Object valorObj = assinatura.get("value");
+            BigDecimal valorParcela = valorObj != null ? new BigDecimal(valorObj.toString()) : BigDecimal.ZERO;
+            if (valorParcela.compareTo(BigDecimal.ZERO) <= 0) {
+                valorParcela = BigDecimal.valueOf(0.01);
+            }
+
+            Object nextDueDateObj = assinatura.get("nextDueDate");
+            LocalDate nextDueDate = null;
+            if (nextDueDateObj != null) {
+                String dateStr = nextDueDateObj.toString();
+                if (dateStr.length() >= 10) {
+                    nextDueDate = LocalDate.parse(dateStr.substring(0, 10));
+                }
+            }
+
+            String titulo = (String) assinatura.get("description");
+            if (titulo == null || titulo.trim().isEmpty()) {
+                titulo = "Contrato Recorrente - " + contrato.getCliente().getRazaoSocial();
+            }
+
+            if (!Objects.equals(contrato.getTitulo(), titulo)) {
+                contrato.setTitulo(titulo);
+                alterou = true;
+            }
+            if (contrato.getValorRecorrencia() == null || contrato.getValorRecorrencia().compareTo(valorParcela) != 0) {
+                contrato.setValorRecorrencia(valorParcela);
+                alterou = true;
+            }
+            if (contrato.getTipoPagamento() != Contrato.TipoPagamento.RECORRENTE) {
+                contrato.setTipoPagamento(Contrato.TipoPagamento.RECORRENTE);
+                alterou = true;
+            }
+
+            int cobrancasAntes = contrato.getCobrancas() != null ? contrato.getCobrancas().size() : 0;
+            importarCobrancasDoAsaas(contrato);
+            sincronizarCobrancasComAsaas(contrato);
+            int cobrancasDepois = contrato.getCobrancas() != null ? contrato.getCobrancas().size() : 0;
+            if (cobrancasDepois != cobrancasAntes) {
+                alterou = true;
+            }
+
+            if (contrato.getCobrancas() != null && !contrato.getCobrancas().isEmpty()) {
+                BigDecimal valorTotal = contrato.getCobrancas().stream()
+                        .map(Cobranca::getValor)
+                        .filter(Objects::nonNull)
+                        .reduce(BigDecimal.ZERO, BigDecimal::add);
+                if (contrato.getValorContrato() == null || contrato.getValorContrato().compareTo(valorTotal) != 0) {
+                    contrato.setValorContrato(valorTotal);
+                    alterou = true;
+                }
+
+                LocalDate proximaCobranca = contrato.getCobrancas().stream()
+                        .filter(c -> c.getStatus() == Cobranca.StatusCobranca.PENDING
+                                || c.getStatus() == Cobranca.StatusCobranca.OVERDUE)
+                        .map(Cobranca::getDataVencimento)
+                        .filter(Objects::nonNull)
+                        .min(LocalDate::compareTo)
+                        .orElse(nextDueDate);
+                if (proximaCobranca != null && !Objects.equals(contrato.getDataVencimento(), proximaCobranca)) {
+                    contrato.setDataVencimento(proximaCobranca);
+                    alterou = true;
+                }
+            } else if (nextDueDate != null && !Objects.equals(contrato.getDataVencimento(), nextDueDate)) {
+                contrato.setDataVencimento(nextDueDate);
+                alterou = true;
+            }
+
+            Contrato.StatusContrato statusAnterior = contrato.getStatus();
+            Contrato.FinancialStatus financeiroAnterior = contrato.getFinancialStatus();
+            contrato.calcularStatusBaseadoNasCobrancas();
+            contrato.setFinancialStatus(calcularFinancialStatus(contrato));
+            if (statusAnterior != contrato.getStatus() || financeiroAnterior != contrato.getFinancialStatus()) {
+                alterou = true;
+            }
+
+            if (alterou) {
+                contratoRepository.save(contrato);
+            }
+            return alterou;
+        } catch (Exception e) {
+            log.warn("Falha ao atualizar contrato recorrente existente {}: {}", contrato.getId(), e.getMessage());
+            return false;
         }
     }
 

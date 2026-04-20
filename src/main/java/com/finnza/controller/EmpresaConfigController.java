@@ -39,12 +39,22 @@ public class EmpresaConfigController {
                 .map(c -> ResponseEntity.ok(Map.of(
                         "idEmpresa", c.getIdEmpresa(),
                         "asaasConfigurado", c.getAsaasApiKey() != null && !c.getAsaasApiKey().isBlank(),
-                        "asaasBaseUrl", c.getAsaasBaseUrl() != null ? c.getAsaasBaseUrl() : ""
+                        "asaasBaseUrl", c.getAsaasBaseUrl() != null ? c.getAsaasBaseUrl() : "",
+                        "cnpj", c.getCnpj() != null ? c.getCnpj() : "",
+                        "razaoSocial", c.getRazaoSocial() != null ? c.getRazaoSocial() : "",
+                        "nomeFantasia", c.getNomeFantasia() != null ? c.getNomeFantasia() : "",
+                        "emailEmpresa", c.getEmailEmpresa() != null ? c.getEmailEmpresa() : "",
+                        "telefoneEmpresa", c.getTelefoneEmpresa() != null ? c.getTelefoneEmpresa() : ""
                 )))
                 .orElse(ResponseEntity.ok(Map.of(
                         "idEmpresa", idEmpresa,
                         "asaasConfigurado", false,
-                        "asaasBaseUrl", ""
+                        "asaasBaseUrl", "",
+                        "cnpj", "",
+                        "razaoSocial", "",
+                        "nomeFantasia", "",
+                        "emailEmpresa", "",
+                        "telefoneEmpresa", ""
                 )));
     }
 
@@ -66,6 +76,11 @@ public class EmpresaConfigController {
         }
         config.setAsaasBaseUrl(request.getAsaasBaseUrl() != null && !request.getAsaasBaseUrl().isBlank()
                 ? request.getAsaasBaseUrl().trim() : null);
+        config.setCnpj(sanitizeDigits(request.getCnpj(), 14));
+        config.setRazaoSocial(trimToNull(request.getRazaoSocial()));
+        config.setNomeFantasia(trimToNull(request.getNomeFantasia()));
+        config.setEmailEmpresa(trimToNull(request.getEmailEmpresa()));
+        config.setTelefoneEmpresa(trimToNull(request.getTelefoneEmpresa()));
         empresaConfigRepository.save(config);
 
         Map<String, Object> body = new LinkedHashMap<>();
@@ -93,5 +108,29 @@ public class EmpresaConfigController {
     public static class EmpresaConfigRequest {
         private String asaasApiKey;
         private String asaasBaseUrl;
+        private String cnpj;
+        private String razaoSocial;
+        private String nomeFantasia;
+        private String emailEmpresa;
+        private String telefoneEmpresa;
+    }
+
+    private static String trimToNull(String value) {
+        if (value == null) {
+            return null;
+        }
+        String normalized = value.trim();
+        return normalized.isBlank() ? null : normalized;
+    }
+
+    private static String sanitizeDigits(String value, int maxLen) {
+        if (value == null) {
+            return null;
+        }
+        String digits = value.replaceAll("\\D", "");
+        if (digits.isBlank()) {
+            return null;
+        }
+        return digits.length() > maxLen ? digits.substring(0, maxLen) : digits;
     }
 }

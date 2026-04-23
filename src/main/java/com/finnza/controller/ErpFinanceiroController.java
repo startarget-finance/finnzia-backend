@@ -18,6 +18,7 @@ import org.springframework.web.multipart.MultipartFile;
 
 import java.time.LocalDateTime;
 import java.time.LocalDate;
+import java.math.BigDecimal;
 import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -35,6 +36,19 @@ import java.util.Map;
 @CrossOrigin(origins = "*")
 @RequiredArgsConstructor
 public class ErpFinanceiroController {
+
+    public record CriarMovimentacaoRequest(
+            Boolean debito,
+            String dataVencimento,
+            String dataCompetencia,
+            String dataQuitacao,
+            BigDecimal valor,
+            String nome,
+            String observacao,
+            String nomeCategoriaFinanceira,
+            String nomeContaFinanceira,
+            String nomeClienteFornecedor
+    ) {}
 
     private final ErpFinanceiroService erpFinanceiroService;
     private final UsuarioEmpresaService usuarioEmpresaService;
@@ -82,9 +96,9 @@ public class ErpFinanceiroController {
         Authentication auth = SecurityContextHolder.getContext().getAuthentication();
         if (auth != null && auth.isAuthenticated()) {
             String email = auth.getName();
-            Integer empresaPadrao = usuarioEmpresaService.obterIdEmpresaPadraoPorEmail(email).orElse(null);
-            if (empresaPadrao != null && empresaPadrao > 0) {
-                return empresaPadrao;
+            Integer empresaContexto = usuarioEmpresaService.obterIdEmpresaContextoPorEmail(email).orElse(null);
+            if (empresaContexto != null && empresaContexto > 0) {
+                return empresaContexto;
             }
         }
         return erpFinanceiroService.obterPrimeiraEmpresaDisponivelId().orElse(null);
@@ -227,6 +241,92 @@ public class ErpFinanceiroController {
                         numeroDaPagina
                 )
         );
+    }
+
+    @PostMapping("/movimentacoes")
+    @PreAuthorize("hasPermission(null, 'MOVIMENTACOES')")
+    public ResponseEntity<?> criarMovimentacao(
+            @RequestHeader(value = "X-Empresa-Id", required = false) String headerEmpresaId,
+            @RequestBody CriarMovimentacaoRequest request
+    ) {
+        Integer idEmpresa = resolverEmpresaId(headerEmpresaId);
+        if (idEmpresa == null) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "erro", true,
+                    "mensagem", "Não foi possível identificar a empresa para esta requisição"
+            ));
+        }
+        if (!validarAcessoEmpresa(idEmpresa)) {
+            return ResponseEntity.status(403).body(Map.of(
+                    "erro", true,
+                    "mensagem", "Você não tem permissão de acessar esta empresa"
+            ));
+        }
+        if (request == null) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "erro", true,
+                    "mensagem", "Dados da movimentação não informados"
+            ));
+        }
+        if (request.valor() == null || request.valor().compareTo(BigDecimal.ZERO) <= 0) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "erro", true,
+                    "mensagem", "Valor deve ser maior que zero"
+            ));
+        }
+        if (request.nome() == null || request.nome().isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "erro", true,
+                    "mensagem", "Descrição é obrigatória"
+            ));
+        }
+        if (request.nomeCategoriaFinanceira() == null || request.nomeCategoriaFinanceira().isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "erro", true,
+                    "mensagem", "Categoria é obrigatória"
+            ));
+        }
+        if (request.dataVencimento() == null || request.dataVencimento().isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "erro", true,
+                    "mensagem", "Data de vencimento é obrigatória"
+            ));
+        }
+
+        try {
+            LocalDate dataVencimento = LocalDate.parse(request.dataVencimento());
+            LocalDate dataCompetencia = request.dataCompetencia() == null || request.dataCompetencia().isBlank()
+                    ? dataVencimento
+                    : LocalDate.parse(request.dataCompetencia());
+            LocalDate dataQuitacao = request.dataQuitacao() == null || request.dataQuitacao().isBlank()
+                    ? null
+                    : LocalDate.parse(request.dataQuitacao());
+
+            Map<String, Object> novaMov = erpFinanceiroService.criarMovimentacaoManual(
+                    idEmpresa,
+                    request.debito(),
+                    dataVencimento,
+                    dataCompetencia,
+                    dataQuitacao,
+                    request.valor(),
+                    request.nome().trim(),
+                    request.observacao(),
+                    request.nomeCategoriaFinanceira().trim(),
+                    request.nomeContaFinanceira(),
+                    request.nomeClienteFornecedor()
+            );
+
+            return ResponseEntity.ok(Map.of(
+                    "erro", false,
+                    "mensagem", "Movimentação cadastrada com sucesso",
+                    "movimentacao", novaMov
+            ));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "erro", true,
+                    "mensagem", "Não foi possível cadastrar a movimentação: " + e.getMessage()
+            ));
+        }
     }
 
     @GetMapping("/resumo-financeiro")
@@ -386,6 +486,44 @@ public class ErpFinanceiroController {
                 "erro", false,
                 "removido", removed
         ));
+    }
+
+    @PostMapping("/conciliacoes-ofx/{id}/aprovar")
+    @PreAuthorize("hasPermission(null, 'MOVIMENTACOES')")
+    public ResponseEntity<?> aprovarConciliacaoOfx(
+            @RequestHeader(value = "X-Empresa-Id", required = false) String headerEmpresaId,
+            @PathVariable("id") Long id
+    ) {
+        Integer idEmpresa = resolverEmpresaId(headerEmpresaId);
+        if (idEmpresa == null) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "erro", true,
+                    "mensagem", "Não foi possível identificar a empresa para esta requisição"
+            ));
+        }
+        if (!validarAcessoEmpresa(idEmpresa)) {
+            return ResponseEntity.status(403).body(Map.of(
+                    "erro", true,
+                    "mensagem", "Você não tem permissão de acessar esta empresa"
+            ));
+        }
+        try {
+            var resumo = ofxImportService.aprovarImportacao(idEmpresa, id);
+            return ResponseEntity.ok(Map.of(
+                    "erro", false,
+                    "importacaoId", resumo.importacaoId(),
+                    "status", resumo.status(),
+                    "aprovadasAgora", resumo.aprovadasAgora(),
+                    "conciliadasTotal", resumo.conciliadasTotal(),
+                    "pendentesTotal", resumo.pendentesTotal(),
+                    "totalMovimentacoes", resumo.totalMovimentacoes()
+            ));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "erro", true,
+                    "mensagem", e.getMessage()
+            ));
+        }
     }
 }
 

@@ -12,6 +12,7 @@ import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
 import jakarta.validation.Valid;
+import java.math.BigDecimal;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -44,7 +45,9 @@ public class EmpresaConfigController {
                         "razaoSocial", c.getRazaoSocial() != null ? c.getRazaoSocial() : "",
                         "nomeFantasia", c.getNomeFantasia() != null ? c.getNomeFantasia() : "",
                         "emailEmpresa", c.getEmailEmpresa() != null ? c.getEmailEmpresa() : "",
-                        "telefoneEmpresa", c.getTelefoneEmpresa() != null ? c.getTelefoneEmpresa() : ""
+                        "telefoneEmpresa", c.getTelefoneEmpresa() != null ? c.getTelefoneEmpresa() : "",
+                        "taxaCartaoCredito", c.getTaxaCartaoCredito() != null ? c.getTaxaCartaoCredito() : BigDecimal.ZERO,
+                        "taxaAntecipacaoCredito", c.getTaxaAntecipacaoCredito() != null ? c.getTaxaAntecipacaoCredito() : BigDecimal.ZERO
                 )))
                 .orElse(ResponseEntity.ok(Map.of(
                         "idEmpresa", idEmpresa,
@@ -54,7 +57,9 @@ public class EmpresaConfigController {
                         "razaoSocial", "",
                         "nomeFantasia", "",
                         "emailEmpresa", "",
-                        "telefoneEmpresa", ""
+                        "telefoneEmpresa", "",
+                        "taxaCartaoCredito", BigDecimal.ZERO,
+                        "taxaAntecipacaoCredito", BigDecimal.ZERO
                 )));
     }
 
@@ -74,13 +79,32 @@ public class EmpresaConfigController {
         if (key != null && !key.isBlank()) {
             config.setAsaasApiKey(key);
         }
-        config.setAsaasBaseUrl(request.getAsaasBaseUrl() != null && !request.getAsaasBaseUrl().isBlank()
-                ? request.getAsaasBaseUrl().trim() : null);
-        config.setCnpj(sanitizeDigits(request.getCnpj(), 14));
-        config.setRazaoSocial(trimToNull(request.getRazaoSocial()));
-        config.setNomeFantasia(trimToNull(request.getNomeFantasia()));
-        config.setEmailEmpresa(trimToNull(request.getEmailEmpresa()));
-        config.setTelefoneEmpresa(trimToNull(request.getTelefoneEmpresa()));
+        if (request.getAsaasBaseUrl() != null) {
+            config.setAsaasBaseUrl(request.getAsaasBaseUrl().isBlank()
+                    ? null
+                    : request.getAsaasBaseUrl().trim());
+        }
+        if (request.getCnpj() != null) {
+            config.setCnpj(sanitizeDigits(request.getCnpj(), 14));
+        }
+        if (request.getRazaoSocial() != null) {
+            config.setRazaoSocial(trimToNull(request.getRazaoSocial()));
+        }
+        if (request.getNomeFantasia() != null) {
+            config.setNomeFantasia(trimToNull(request.getNomeFantasia()));
+        }
+        if (request.getEmailEmpresa() != null) {
+            config.setEmailEmpresa(trimToNull(request.getEmailEmpresa()));
+        }
+        if (request.getTelefoneEmpresa() != null) {
+            config.setTelefoneEmpresa(trimToNull(request.getTelefoneEmpresa()));
+        }
+        if (request.getTaxaCartaoCredito() != null) {
+            config.setTaxaCartaoCredito(normalizeRate(request.getTaxaCartaoCredito()));
+        }
+        if (request.getTaxaAntecipacaoCredito() != null) {
+            config.setTaxaAntecipacaoCredito(normalizeRate(request.getTaxaAntecipacaoCredito()));
+        }
         empresaConfigRepository.save(config);
 
         Map<String, Object> body = new LinkedHashMap<>();
@@ -113,6 +137,8 @@ public class EmpresaConfigController {
         private String nomeFantasia;
         private String emailEmpresa;
         private String telefoneEmpresa;
+        private BigDecimal taxaCartaoCredito;
+        private BigDecimal taxaAntecipacaoCredito;
     }
 
     private static String trimToNull(String value) {
@@ -132,5 +158,12 @@ public class EmpresaConfigController {
             return null;
         }
         return digits.length() > maxLen ? digits.substring(0, maxLen) : digits;
+    }
+
+    private static BigDecimal normalizeRate(BigDecimal value) {
+        if (value == null || value.compareTo(BigDecimal.ZERO) < 0) {
+            return BigDecimal.ZERO;
+        }
+        return value.setScale(4, java.math.RoundingMode.HALF_UP);
     }
 }

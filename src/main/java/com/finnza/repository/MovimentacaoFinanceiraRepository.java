@@ -4,6 +4,7 @@ import com.finnza.domain.entity.MovimentacaoFinanceira;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
@@ -18,23 +19,75 @@ public interface MovimentacaoFinanceiraRepository extends JpaRepository<Moviment
 
     // ── Por vencimento ────────────────────────────────────────────────────────
 
+    @Query("""
+            SELECT m FROM MovimentacaoFinanceira m
+            WHERE m.idEmpresa = :idEmpresa
+              AND m.dataVencimento BETWEEN :dataInicio AND :dataTermino
+              AND (m.ofxAprovado IS NULL OR m.ofxAprovado = true)
+            """)
     Page<MovimentacaoFinanceira> findByIdEmpresaAndDataVencimentoBetween(
-            Integer idEmpresa, LocalDate dataInicio, LocalDate dataTermino, Pageable pageable);
+            @Param("idEmpresa") Integer idEmpresa,
+            @Param("dataInicio") LocalDate dataInicio,
+            @Param("dataTermino") LocalDate dataTermino,
+            Pageable pageable);
 
+    @Query("""
+            SELECT m FROM MovimentacaoFinanceira m
+            WHERE m.idEmpresa = :idEmpresa
+              AND m.debito = :debito
+              AND m.dataVencimento BETWEEN :dataInicio AND :dataTermino
+              AND (m.ofxAprovado IS NULL OR m.ofxAprovado = true)
+            """)
     Page<MovimentacaoFinanceira> findByIdEmpresaAndDebitoAndDataVencimentoBetween(
-            Integer idEmpresa, Boolean debito, LocalDate dataInicio, LocalDate dataTermino, Pageable pageable);
+            @Param("idEmpresa") Integer idEmpresa,
+            @Param("debito") Boolean debito,
+            @Param("dataInicio") LocalDate dataInicio,
+            @Param("dataTermino") LocalDate dataTermino,
+            Pageable pageable);
 
+    @Query("""
+            SELECT m FROM MovimentacaoFinanceira m
+            WHERE m.idEmpresa = :idEmpresa
+              AND m.debito = :debito
+              AND m.statusPagamento = :statusPagamento
+              AND m.dataVencimento BETWEEN :dataInicio AND :dataTermino
+              AND (m.ofxAprovado IS NULL OR m.ofxAprovado = true)
+            """)
     Page<MovimentacaoFinanceira> findByIdEmpresaAndDebitoAndStatusPagamentoAndDataVencimentoBetween(
-            Integer idEmpresa, Boolean debito, String statusPagamento,
-            LocalDate dataInicio, LocalDate dataTermino, Pageable pageable);
+            @Param("idEmpresa") Integer idEmpresa,
+            @Param("debito") Boolean debito,
+            @Param("statusPagamento") String statusPagamento,
+            @Param("dataInicio") LocalDate dataInicio,
+            @Param("dataTermino") LocalDate dataTermino,
+            Pageable pageable);
 
     // ── Por competência ───────────────────────────────────────────────────────
 
+    @Query("""
+            SELECT m FROM MovimentacaoFinanceira m
+            WHERE m.idEmpresa = :idEmpresa
+              AND m.dataCompetencia BETWEEN :dataInicio AND :dataTermino
+              AND (m.ofxAprovado IS NULL OR m.ofxAprovado = true)
+            """)
     Page<MovimentacaoFinanceira> findByIdEmpresaAndDataCompetenciaBetween(
-            Integer idEmpresa, LocalDate dataInicio, LocalDate dataTermino, Pageable pageable);
+            @Param("idEmpresa") Integer idEmpresa,
+            @Param("dataInicio") LocalDate dataInicio,
+            @Param("dataTermino") LocalDate dataTermino,
+            Pageable pageable);
 
+    @Query("""
+            SELECT m FROM MovimentacaoFinanceira m
+            WHERE m.idEmpresa = :idEmpresa
+              AND m.debito = :debito
+              AND m.dataCompetencia BETWEEN :dataInicio AND :dataTermino
+              AND (m.ofxAprovado IS NULL OR m.ofxAprovado = true)
+            """)
     Page<MovimentacaoFinanceira> findByIdEmpresaAndDebitoAndDataCompetenciaBetween(
-            Integer idEmpresa, Boolean debito, LocalDate dataInicio, LocalDate dataTermino, Pageable pageable);
+            @Param("idEmpresa") Integer idEmpresa,
+            @Param("debito") Boolean debito,
+            @Param("dataInicio") LocalDate dataInicio,
+            @Param("dataTermino") LocalDate dataTermino,
+            Pageable pageable);
 
     // ── Totalizadores para resumo financeiro ──────────────────────────────────
 
@@ -44,6 +97,7 @@ public interface MovimentacaoFinanceiraRepository extends JpaRepository<Moviment
            WHERE m.idEmpresa = :idEmpresa
              AND m.debito = :debito
              AND m.dataVencimento BETWEEN :dataInicio AND :dataTermino
+             AND (m.ofxAprovado IS NULL OR m.ofxAprovado = true)
            """)
     BigDecimal sumValorByEmpresaAndDebitoAndVencimento(
             @Param("idEmpresa") Integer idEmpresa,
@@ -58,6 +112,7 @@ public interface MovimentacaoFinanceiraRepository extends JpaRepository<Moviment
              AND m.debito = :debito
              AND m.statusPagamento = :statusPagamento
              AND m.dataVencimento BETWEEN :dataInicio AND :dataTermino
+             AND (m.ofxAprovado IS NULL OR m.ofxAprovado = true)
            """)
     BigDecimal sumValorByEmpresaAndDebitoAndStatusAndVencimento(
             @Param("idEmpresa") Integer idEmpresa,
@@ -68,16 +123,42 @@ public interface MovimentacaoFinanceiraRepository extends JpaRepository<Moviment
 
     // ── Busca completa (sem paginação) — usada para DFC ──────────────────────
 
+    @Query("""
+            SELECT m FROM MovimentacaoFinanceira m
+            WHERE m.idEmpresa = :idEmpresa
+              AND m.dataVencimento BETWEEN :dataInicio AND :dataTermino
+              AND (m.ofxAprovado IS NULL OR m.ofxAprovado = true)
+            """)
     List<MovimentacaoFinanceira> findAllByIdEmpresaAndDataVencimentoBetween(
-            Integer idEmpresa, LocalDate dataInicio, LocalDate dataTermino);
+            @Param("idEmpresa") Integer idEmpresa,
+            @Param("dataInicio") LocalDate dataInicio,
+            @Param("dataTermino") LocalDate dataTermino);
 
     // ── Verificação de existência de dados sync'd ──────────────────────────────
 
+    @Query("""
+            SELECT CASE WHEN COUNT(m) > 0 THEN true ELSE false END
+            FROM MovimentacaoFinanceira m
+            WHERE m.idEmpresa = :idEmpresa
+              AND m.dataVencimento BETWEEN :dataInicio AND :dataTermino
+              AND (m.ofxAprovado IS NULL OR m.ofxAprovado = true)
+            """)
     boolean existsByIdEmpresaAndDataVencimentoBetween(
-            Integer idEmpresa, LocalDate dataInicio, LocalDate dataTermino);
+            @Param("idEmpresa") Integer idEmpresa,
+            @Param("dataInicio") LocalDate dataInicio,
+            @Param("dataTermino") LocalDate dataTermino);
 
+    @Query("""
+            SELECT COUNT(m)
+            FROM MovimentacaoFinanceira m
+            WHERE m.idEmpresa = :idEmpresa
+              AND m.dataVencimento BETWEEN :dataInicio AND :dataTermino
+              AND (m.ofxAprovado IS NULL OR m.ofxAprovado = true)
+            """)
     long countByIdEmpresaAndDataVencimentoBetween(
-            Integer idEmpresa, LocalDate dataInicio, LocalDate dataTermino);
+            @Param("idEmpresa") Integer idEmpresa,
+            @Param("dataInicio") LocalDate dataInicio,
+            @Param("dataTermino") LocalDate dataTermino);
 
     // ── Empresas (para telas de acessos/config) ───────────────────────────────
 
@@ -93,4 +174,22 @@ public interface MovimentacaoFinanceiraRepository extends JpaRepository<Moviment
      * Fluxo single-tenant: usa o primeiro ID de empresa disponível mesmo quando o nome estiver nulo.
      */
     Optional<MovimentacaoFinanceira> findFirstByIdEmpresaIsNotNullOrderByIdEmpresaAsc();
+
+    long countByIdEmpresaAndOfxImportacaoId(Integer idEmpresa, Long ofxImportacaoId);
+
+    @Modifying
+    @Query("""
+            UPDATE MovimentacaoFinanceira m
+            SET m.ofxAprovado = true
+            WHERE m.idEmpresa = :idEmpresa
+              AND m.ofxImportacaoId = :ofxImportacaoId
+              AND (m.ofxAprovado IS NULL OR m.ofxAprovado = false)
+            """)
+    int aprovarConciliacaoOfx(
+            @Param("idEmpresa") Integer idEmpresa,
+            @Param("ofxImportacaoId") Long ofxImportacaoId
+    );
+
+    @Modifying
+    int deleteByIdEmpresaAndOfxImportacaoId(Integer idEmpresa, Long ofxImportacaoId);
 }

@@ -69,6 +69,81 @@ public class FaturaCartaoController {
         return ResponseEntity.ok(faturaCartaoService.gerarContasPagar(request.nomeCartao(), request.lancamentos()));
     }
 
+    @GetMapping("/cadastros")
+    @PreAuthorize("hasPermission(null, 'MOVIMENTACOES')")
+    public ResponseEntity<Map<String, Object>> listarCadastros(
+            @RequestHeader(value = "X-Empresa-Id", required = false) String headerEmpresaId,
+            @RequestParam(required = false) Integer idsEmpresa) {
+        Integer empresaFinal = extrairEmpresa(headerEmpresaId, idsEmpresa);
+        if (empresaFinal == null) {
+            return ResponseEntity.ok(Map.of("itens", List.of()));
+        }
+        if (!validarAcessoEmpresa(empresaFinal)) {
+            return ResponseEntity.status(403).body(Map.of("erro", true, "mensagem", "Sem permissao para empresa."));
+        }
+        return ResponseEntity.ok(Map.of("itens", faturaCartaoService.listarCartoesCadastrados(empresaFinal)));
+    }
+
+    @PostMapping("/cadastros")
+    @PreAuthorize("hasPermission(null, 'MOVIMENTACOES')")
+    public ResponseEntity<Map<String, Object>> criarCadastro(
+            @RequestHeader(value = "X-Empresa-Id", required = false) String headerEmpresaId,
+            @RequestBody Map<String, Object> payload) {
+        Integer empresaFinal = extrairEmpresa(headerEmpresaId, null);
+        if (empresaFinal == null) {
+            return ResponseEntity.badRequest().body(Map.of("erro", true, "mensagem", "Empresa não identificada."));
+        }
+        if (!validarAcessoEmpresa(empresaFinal)) {
+            return ResponseEntity.status(403).body(Map.of("erro", true, "mensagem", "Sem permissao para empresa."));
+        }
+        try {
+            return ResponseEntity.ok(Map.of("erro", false, "item", faturaCartaoService.criarCartao(empresaFinal, payload)));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("erro", true, "mensagem", e.getMessage()));
+        }
+    }
+
+    @PutMapping("/cadastros/{id}")
+    @PreAuthorize("hasPermission(null, 'MOVIMENTACOES')")
+    public ResponseEntity<Map<String, Object>> atualizarCadastro(
+            @RequestHeader(value = "X-Empresa-Id", required = false) String headerEmpresaId,
+            @PathVariable Long id,
+            @RequestBody Map<String, Object> payload) {
+        Integer empresaFinal = extrairEmpresa(headerEmpresaId, null);
+        if (empresaFinal == null) {
+            return ResponseEntity.badRequest().body(Map.of("erro", true, "mensagem", "Empresa não identificada."));
+        }
+        if (!validarAcessoEmpresa(empresaFinal)) {
+            return ResponseEntity.status(403).body(Map.of("erro", true, "mensagem", "Sem permissao para empresa."));
+        }
+        try {
+            faturaCartaoService.atualizarCartao(empresaFinal, id, payload);
+            return ResponseEntity.ok(Map.of("erro", false));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("erro", true, "mensagem", e.getMessage()));
+        }
+    }
+
+    @DeleteMapping("/cadastros/{id}")
+    @PreAuthorize("hasPermission(null, 'MOVIMENTACOES')")
+    public ResponseEntity<Map<String, Object>> removerCadastro(
+            @RequestHeader(value = "X-Empresa-Id", required = false) String headerEmpresaId,
+            @PathVariable Long id) {
+        Integer empresaFinal = extrairEmpresa(headerEmpresaId, null);
+        if (empresaFinal == null) {
+            return ResponseEntity.badRequest().body(Map.of("erro", true, "mensagem", "Empresa não identificada."));
+        }
+        if (!validarAcessoEmpresa(empresaFinal)) {
+            return ResponseEntity.status(403).body(Map.of("erro", true, "mensagem", "Sem permissao para empresa."));
+        }
+        try {
+            faturaCartaoService.removerCartao(empresaFinal, id);
+            return ResponseEntity.ok(Map.of("erro", false));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("erro", true, "mensagem", e.getMessage()));
+        }
+    }
+
     public record ImportarFaturaRequest(String csvContent) {}
 
     public record GerarContasPagarRequest(String nomeCartao, List<Map<String, Object>> lancamentos) {}
@@ -88,7 +163,7 @@ public class FaturaCartaoController {
             return null;
         }
         String email = auth.getName();
-        Integer empresaPadrao = usuarioEmpresaService.obterIdEmpresaPadraoPorEmail(email).orElse(null);
+        Integer empresaPadrao = usuarioEmpresaService.obterIdEmpresaContextoPorEmail(email).orElse(null);
         if (empresaPadrao != null && empresaPadrao > 0) {
             return empresaPadrao;
         }

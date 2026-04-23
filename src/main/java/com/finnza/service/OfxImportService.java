@@ -48,6 +48,15 @@ public class OfxImportService {
             LocalDate dataFim
     ) {}
 
+    public record AprovacaoResumo(
+            Long importacaoId,
+            String status,
+            int aprovadasAgora,
+            int conciliadasTotal,
+            int pendentesTotal,
+            int totalMovimentacoes
+    ) {}
+
     @Transactional
     public ImportResumo importar(InputStream ofxStream, Integer idEmpresa, String nomeArquivo, String tipoImportacao) {
         Objects.requireNonNull(ofxStream, "ofxStream");
@@ -65,7 +74,7 @@ public class OfxImportService {
             if (msgSet instanceof BankingResponseMessageSet banking) {
                 for (BankStatementResponseTransaction txResp : banking.getStatementResponses()) {
                     BankStatementResponse stmt = txResp.getMessage();
-                    candidatos.addAll(mapStatement(idEmpresa, stmt.getAccount().getAccountNumber(), stmt.getCurrencyCode(), stmt.getTransactionList().getTransactions()));
+                    candidatos.addAll(mapStatement(idEmpresa, null, stmt.getAccount().getAccountNumber(), stmt.getCurrencyCode(), stmt.getTransactionList().getTransactions()));
                 }
             }
         } catch (Exception e) {
@@ -79,7 +88,7 @@ public class OfxImportService {
                 for (CreditCardStatementResponseTransaction txResp : cc.getStatementResponses()) {
                     CreditCardStatementResponse stmt = txResp.getMessage();
                     String conta = stmt.getAccount() != null ? stmt.getAccount().getAccountNumber() : null;
-                    candidatos.addAll(mapStatement(idEmpresa, conta, stmt.getCurrencyCode(), stmt.getTransactionList().getTransactions()));
+                    candidatos.addAll(mapStatement(idEmpresa, null, conta, stmt.getCurrencyCode(), stmt.getTransactionList().getTransactions()));
                 }
             }
         } catch (Exception e) {
@@ -96,10 +105,6 @@ public class OfxImportService {
                 .filter(m -> m.getIdMovimentacao() != null && !existentes.contains(m.getIdMovimentacao()))
                 .toList();
 
-        if (!novos.isEmpty()) {
-            movimentacaoRepo.saveAll(novos);
-        }
-
         LocalDate min = candidatos.stream().map(MovimentacaoFinanceira::getDataVencimento).filter(Objects::nonNull).min(LocalDate::compareTo).orElse(null);
         LocalDate max = candidatos.stream().map(MovimentacaoFinanceira::getDataVencimento).filter(Objects::nonNull).max(LocalDate::compareTo).orElse(null);
         String conta = candidatos.stream().map(MovimentacaoFinanceira::getNomeContaFinanceira).filter(Objects::nonNull).findFirst().orElse(null);
@@ -108,17 +113,23 @@ public class OfxImportService {
                 .idEmpresa(idEmpresa)
                 .arquivoNome(nomeArquivo)
                 .tipo(firstNonBlank(tipoImportacao, "MANUAL"))
-                .status("CONCILIADO")
+                // Importação OFX entra como pré-aprovação (sem conciliação automática).
+                .status("PENDENTE")
                 .dataImportacao(LocalDateTime.now())
                 .banco("OFX")
                 .conta(conta)
                 .periodoInicio(min)
                 .periodoFim(max)
-                .totalConciliadas(novos.size())
+                .totalConciliadas(0)
                 .totalIgnoradas(Math.max(0, candidatos.size() - novos.size()))
-                .totalPendentes(0)
+                .totalPendentes(novos.size())
                 .total(candidatos.size())
                 .build());
+
+        if (!novos.isEmpty()) {
+            novos.forEach(m -> m.setOfxImportacaoId(importacao.getId()));
+            movimentacaoRepo.saveAll(novos);
+        }
 
         return new ImportResumo(
                 candidatos.size(),
@@ -180,8 +191,52 @@ public class OfxImportService {
         if (!Objects.equals(row.getIdEmpresa(), idEmpresa)) {
             throw new IllegalArgumentException("Importação não pertence à empresa selecionada");
         }
+        movimentacaoRepo.deleteByIdEmpresaAndOfxImportacaoId(idEmpresa, importacaoId);
         ofxImportacaoRepository.deleteById(importacaoId);
         return true;
+    }
+
+    @Transactional
+    public AprovacaoResumo aprovarImportacao(Integer idEmpresa, Long importacaoId) {
+        Optional<OfxImportacao> op = ofxImportacaoRepository.findById(importacaoId);
+        if (op.isEmpty()) {
+            throw new IllegalArgumentException("Importação OFX não encontrada");
+        }
+        OfxImportacao row = op.get();
+        if (!Objects.equals(row.getIdEmpresa(), idEmpresa)) {
+            throw new IllegalArgumentException("Importação não pertence à empresa selecionada");
+        }
+
+        int pendentesAntes = safeInt(row.getTotalPendentes());
+        int conciliadasAntes = safeInt(row.getTotalConciliadas());
+        int aprovadasAgora = movimentacaoRepo.aprovarConciliacaoOfx(idEmpresa, importacaoId);
+        int totalMovimentacoes = (int) movimentacaoRepo.countByIdEmpresaAndOfxImportacaoId(idEmpresa, importacaoId);
+
+        int pendentesDepois = Math.max(0, pendentesAntes - aprovadasAgora);
+        int conciliadasDepois = conciliadasAntes + aprovadasAgora;
+
+        row.setTotalPendentes(pendentesDepois);
+        row.setTotalConciliadas(conciliadasDepois);
+        if (aprovadasAgora == 0 && conciliadasDepois == 0) {
+            // Lote sem novos lançamentos para aprovar (ex.: importação 100% duplicada).
+            row.setStatus("PENDENTE");
+        } else if (pendentesDepois == 0) {
+            row.setStatus("CONCILIADO");
+        } else if (conciliadasDepois > 0) {
+            row.setStatus("PARCIAL");
+        } else {
+            row.setStatus("PENDENTE");
+        }
+        ofxImportacaoRepository.save(row);
+
+        return new AprovacaoResumo(
+                row.getId(),
+                row.getStatus(),
+                aprovadasAgora,
+                conciliadasDepois,
+                pendentesDepois,
+                totalMovimentacoes
+        );
     }
 
     private ResponseEnvelope parseEnvelope(InputStream ofxStream) {
@@ -197,6 +252,7 @@ public class OfxImportService {
 
     private List<MovimentacaoFinanceira> mapStatement(
             Integer idEmpresa,
+            Long ofxImportacaoId,
             String accountNumber,
             String currencyCode,
             List<?> txs
@@ -227,7 +283,8 @@ public class OfxImportService {
                     .debito(debito)
                     .dataVencimento(posted)
                     .dataCompetencia(posted)
-                    .dataQuitacao(posted)
+                    // Não marca quitação/conciliação no import inicial (pré-aprovação).
+                    .dataQuitacao(null)
                     .dataConciliacao(null)
                     .valor(valor)
                     .formaPagamento(null)
@@ -246,9 +303,11 @@ public class OfxImportService {
                     .idCliente(null)
                     .idFornecedor(null)
                     .nomeClienteFornecedor(null)
-                    .statusPagamento("pago")
+                    .statusPagamento("pendente")
                     .dadosRaw(null)
                     .sincronizadoEm(null)
+                    .ofxImportacaoId(ofxImportacaoId)
+                    .ofxAprovado(false)
                     .build();
 
             out.add(m);
@@ -290,6 +349,10 @@ public class OfxImportService {
         } catch (Exception e) {
             return UUID.randomUUID().toString().replace("-", "").substring(0, 16);
         }
+    }
+
+    private static int safeInt(Integer value) {
+        return value != null ? value : 0;
     }
 }
 

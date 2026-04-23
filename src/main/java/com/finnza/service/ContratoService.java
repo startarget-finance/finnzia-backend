@@ -4,12 +4,14 @@ import com.finnza.config.EmpresaContextHolder;
 import com.finnza.domain.entity.Cliente;
 import com.finnza.domain.entity.Contrato;
 import com.finnza.domain.entity.Cobranca;
+import com.finnza.domain.entity.EmpresaConfig;
 import com.finnza.dto.request.CriarContratoRequest;
 import com.finnza.dto.request.WorkflowTransitionRequest;
 import com.finnza.dto.response.ContratoDTO;
 import com.finnza.repository.ClienteRepository;
 import com.finnza.repository.ContratoRepository;
 import com.finnza.repository.CobrancaRepository;
+import com.finnza.repository.EmpresaConfigRepository;
 import com.finnza.service.UsuarioEmpresaService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -31,6 +33,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.stream.Collectors;
+import java.math.RoundingMode;
 
 /**
  * Service para gerenciamento de contratos
@@ -53,6 +56,9 @@ public class ContratoService {
 
     @Autowired
     private UsuarioEmpresaService usuarioEmpresaService;
+
+    @Autowired
+    private EmpresaConfigRepository empresaConfigRepository;
 
     /**
      * Cria um novo contrato
@@ -853,21 +859,112 @@ public class ContratoService {
                 request.getNumeroParcelas()
         );
 
-        // Criar cobrança no banco
-        Cobranca cobranca = Cobranca.builder()
-                .contrato(contrato)
-                .valor(contrato.getValorContrato())
-                .dataVencimento(contrato.getDataVencimento())
-                .status(Cobranca.StatusCobranca.PENDING)
-                .asaasPaymentId((String) response.get("id"))
-                .linkPagamento((String) response.get("invoiceUrl"))
-                .codigoBarras((String) response.get("barcode"))
-                .build();
+        Integer numeroParcelas = request.getNumeroParcelas() != null && request.getNumeroParcelas() > 0
+                ? request.getNumeroParcelas()
+                : 1;
+        boolean cartaoCredito = request.getFormaPagamento() != null
+                && "CREDIT_CARD".equalsIgnoreCase(request.getFormaPagamento().trim());
 
-        contrato.adicionarCobranca(cobranca);
+        if (cartaoCredito && numeroParcelas > 1) {
+            criarParcelasCartaoComTaxas(contrato, request, response, numeroParcelas);
+        } else {
+            // Fluxo padrão (à vista ou não-cartão): mantém valor integral.
+            Cobranca cobranca = Cobranca.builder()
+                    .contrato(contrato)
+                    .valor(contrato.getValorContrato())
+                    .dataVencimento(contrato.getDataVencimento())
+                    .status(Cobranca.StatusCobranca.PENDING)
+                    .asaasPaymentId((String) response.get("id"))
+                    .linkPagamento((String) response.get("invoiceUrl"))
+                    .codigoBarras((String) response.get("barcode"))
+                    .numeroParcela(1)
+                    .build();
+            contrato.adicionarCobranca(cobranca);
+        }
+
         // Recalcular status do contrato baseado nas cobranças
         contrato.calcularStatusBaseadoNasCobrancas();
         contratoRepository.save(contrato);
+    }
+
+    private void criarParcelasCartaoComTaxas(
+            Contrato contrato,
+            CriarContratoRequest request,
+            Map<String, Object> responseAsaas,
+            int numeroParcelas
+    ) {
+        TaxasCartaoEmpresa taxas = carregarTaxasCartaoEmpresaAtual();
+        BigDecimal valorTotal = contrato.getValorContrato() != null ? contrato.getValorContrato() : BigDecimal.ZERO;
+        BigDecimal valorParcelaBruta = valorTotal
+                .divide(BigDecimal.valueOf(numeroParcelas), 8, RoundingMode.HALF_UP);
+
+        for (int parcela = 1; parcela <= numeroParcelas; parcela++) {
+            LocalDate vencimentoParcela = contrato.getDataVencimento() != null
+                    ? contrato.getDataVencimento().plusMonths(parcela - 1L)
+                    : LocalDate.now().plusMonths(parcela - 1L);
+            int mesesAntecipacao = Math.max(0, parcela - 1);
+            BigDecimal percentualAntecipacao = taxas.taxaAntecipacaoPercentualMensal()
+                    .multiply(BigDecimal.valueOf(mesesAntecipacao));
+
+            BigDecimal percentualTotal = taxas.taxaCartaoPercentual().add(percentualAntecipacao);
+            BigDecimal fatorLiquido = BigDecimal.ONE.subtract(percentualTotal);
+            if (fatorLiquido.compareTo(BigDecimal.ZERO) < 0) {
+                fatorLiquido = BigDecimal.ZERO;
+            }
+
+            BigDecimal valorLiquidoParcela = valorParcelaBruta.multiply(fatorLiquido).setScale(2, RoundingMode.HALF_UP);
+
+            Cobranca.CobrancaBuilder builder = Cobranca.builder()
+                    .contrato(contrato)
+                    .valor(valorLiquidoParcela)
+                    .dataVencimento(vencimentoParcela)
+                    .status(Cobranca.StatusCobranca.PENDING)
+                    .numeroParcela(parcela);
+
+            if (parcela == 1) {
+                builder
+                        .asaasPaymentId((String) responseAsaas.get("id"))
+                        .linkPagamento((String) responseAsaas.get("invoiceUrl"))
+                        .codigoBarras((String) responseAsaas.get("barcode"));
+            }
+
+            contrato.adicionarCobranca(builder.build());
+        }
+    }
+
+    private TaxasCartaoEmpresa carregarTaxasCartaoEmpresaAtual() {
+        Integer idEmpresa = EmpresaContextHolder.getIdEmpresa();
+        if (idEmpresa == null) {
+            return TaxasCartaoEmpresa.ZERO;
+        }
+
+        EmpresaConfig config = empresaConfigRepository.findByIdEmpresa(idEmpresa).orElse(null);
+        if (config == null) {
+            return TaxasCartaoEmpresa.ZERO;
+        }
+
+        BigDecimal taxaCartao = config.getTaxaCartaoCredito() != null ? config.getTaxaCartaoCredito() : BigDecimal.ZERO;
+        BigDecimal taxaAntecipacao = config.getTaxaAntecipacaoCredito() != null
+                ? config.getTaxaAntecipacaoCredito()
+                : BigDecimal.ZERO;
+        return new TaxasCartaoEmpresa(
+                normalizarPercentual(taxaCartao),
+                normalizarPercentual(taxaAntecipacao)
+        );
+    }
+
+    private BigDecimal normalizarPercentual(BigDecimal percentual) {
+        if (percentual == null || percentual.compareTo(BigDecimal.ZERO) <= 0) {
+            return BigDecimal.ZERO;
+        }
+        return percentual.divide(BigDecimal.valueOf(100), 8, RoundingMode.HALF_UP);
+    }
+
+    private record TaxasCartaoEmpresa(
+            BigDecimal taxaCartaoPercentual,
+            BigDecimal taxaAntecipacaoPercentualMensal
+    ) {
+        private static final TaxasCartaoEmpresa ZERO = new TaxasCartaoEmpresa(BigDecimal.ZERO, BigDecimal.ZERO);
     }
 
     /**

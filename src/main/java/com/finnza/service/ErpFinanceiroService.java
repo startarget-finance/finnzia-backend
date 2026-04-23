@@ -15,6 +15,7 @@ import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.YearMonth;
+import java.util.UUID;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -35,6 +36,55 @@ public class ErpFinanceiroService {
 
     private final MovimentacaoFinanceiraRepository movimentacaoRepo;
     private final DashboardKpiService dashboardKpiService;
+
+    public Map<String, Object> criarMovimentacaoManual(
+            Integer idEmpresa,
+            Boolean debito,
+            LocalDate dataVencimento,
+            LocalDate dataCompetencia,
+            LocalDate dataQuitacao,
+            BigDecimal valor,
+            String nome,
+            String observacao,
+            String nomeCategoriaFinanceira,
+            String nomeContaFinanceira,
+            String nomeClienteFornecedor
+    ) {
+        MovimentacaoFinanceira mov = MovimentacaoFinanceira.builder()
+                .idMovimentacao("manual:" + UUID.randomUUID().toString().replace("-", ""))
+                .idEmpresa(idEmpresa)
+                .debito(Boolean.TRUE.equals(debito))
+                .dataVencimento(dataVencimento)
+                .dataCompetencia(dataCompetencia != null ? dataCompetencia : dataVencimento)
+                .dataQuitacao(dataQuitacao)
+                .dataConciliacao(null)
+                .valor(valor)
+                .formaPagamento(null)
+                .nomeFormaPagamento(null)
+                .tipoMovimentacao(null)
+                .nomeTipoMovimentacao(Boolean.TRUE.equals(debito) ? "Despesa" : "Receita")
+                .nome(nome)
+                .observacao(observacao)
+                .numeroParcela(1)
+                .quantidadeParcela(1)
+                .idCategoriaFinanceira(null)
+                .nomeCategoriaFinanceira(nomeCategoriaFinanceira)
+                .idContaFinanceira(null)
+                .nomeContaFinanceira(nomeContaFinanceira)
+                .nomeEmpresa("Empresa " + idEmpresa)
+                .idCliente(null)
+                .idFornecedor(null)
+                .nomeClienteFornecedor(nomeClienteFornecedor)
+                .statusPagamento(dataQuitacao != null ? "pago" : "pendente")
+                .dadosRaw(null)
+                .sincronizadoEm(LocalDateTime.now())
+                .ofxImportacaoId(null)
+                .ofxAprovado(true)
+                .build();
+
+        MovimentacaoFinanceira saved = movimentacaoRepo.save(mov);
+        return entityToMap(saved);
+    }
 
     /**
      * Busca movimentações no banco local no formato esperado pelo frontend.

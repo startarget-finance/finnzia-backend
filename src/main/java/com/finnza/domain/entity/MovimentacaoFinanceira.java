@@ -115,6 +115,17 @@ public class MovimentacaoFinanceira {
     @Column(name = "sincronizado_em")
     private LocalDateTime sincronizadoEm;
 
+    /** Identifica o lote OFX de origem para fluxo de pré-aprovação. */
+    @Column(name = "ofx_importacao_id")
+    private Long ofxImportacaoId;
+
+    /**
+     * false = importado e ainda não aprovado no fluxo OFX.
+     * true/null = visível normalmente em movimentações.
+     */
+    @Column(name = "ofx_aprovado")
+    private Boolean ofxAprovado;
+
     @CreationTimestamp
     @Column(name = "created_at", updatable = false)
     private LocalDateTime createdAt;

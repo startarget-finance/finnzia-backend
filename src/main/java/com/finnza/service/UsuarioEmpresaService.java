@@ -39,11 +39,17 @@ public class UsuarioEmpresaService {
     public List<EmpresaUsuarioDTO> obterEmpresasDoUsuario(Long usuarioId) {
         log.info("Consultando empresas do usuário ID: {}", usuarioId);
         
-        validarUsuarioExiste(usuarioId);
+        Usuario usuario = validarUsuarioExiste(usuarioId);
         
         List<EmpresaUsuario> empresas = empresaUsuarioRepository.findAllByUsuarioId(usuarioId);
+        if (empresas.isEmpty()) {
+            log.info("Usuário {} sem vínculos ativos em empresa_usuario; aplicando fallback single-tenant", usuarioId);
+            return empresaFallbackSingleTenant(usuario)
+                    .map(List::of)
+                    .orElseGet(List::of);
+        }
+
         log.info("Usuário {} tem {} empresas ativas", usuarioId, empresas.size());
-        
         return empresas.stream()
                 .map(this::toDTO)
                 .collect(Collectors.toList());
@@ -67,10 +73,16 @@ public class UsuarioEmpresaService {
      */
     @Transactional(readOnly = true)
     public Optional<EmpresaUsuarioDTO> obterEmpresaPadrao(Long usuarioId) {
-        validarUsuarioExiste(usuarioId);
-        
-        return empresaUsuarioRepository.findEmpresaPadraoByUsuarioId(usuarioId)
+        Usuario usuario = validarUsuarioExiste(usuarioId);
+
+        Optional<EmpresaUsuarioDTO> padraoReal = empresaUsuarioRepository.findEmpresaPadraoByUsuarioId(usuarioId)
                 .map(this::toDTO);
+        if (padraoReal.isPresent()) {
+            return padraoReal;
+        }
+
+        // Fallback compatível com o modelo "1 usuário = 1 empresa".
+        return empresaFallbackSingleTenant(usuario);
     }
 
     /**
@@ -324,8 +336,9 @@ public class UsuarioEmpresaService {
      */
     @Transactional(readOnly = true)
     public boolean temEmpresasAtivas(Long usuarioId) {
-        validarUsuarioExiste(usuarioId);
-        return empresaUsuarioRepository.usuarioTemEmpresasAtivas(usuarioId);
+        Usuario usuario = validarUsuarioExiste(usuarioId);
+        boolean temEmpresas = empresaUsuarioRepository.usuarioTemEmpresasAtivas(usuarioId);
+        return temEmpresas || empresaFallbackSingleTenant(usuario).isPresent();
     }
 
     /**
@@ -333,8 +346,12 @@ public class UsuarioEmpresaService {
      */
     @Transactional(readOnly = true)
     public long contarEmpresasAtivas(Long usuarioId) {
-        validarUsuarioExiste(usuarioId);
-        return empresaUsuarioRepository.countAtivasByUsuarioId(usuarioId);
+        Usuario usuario = validarUsuarioExiste(usuarioId);
+        long total = empresaUsuarioRepository.countAtivasByUsuarioId(usuarioId);
+        if (total > 0) {
+            return total;
+        }
+        return empresaFallbackSingleTenant(usuario).isPresent() ? 1L : 0L;
     }
 
     // ==================== Helpers ====================
@@ -442,6 +459,47 @@ public class UsuarioEmpresaService {
                 .filter(id -> id != null && id > 0);
     }
 
+    /**
+     * Resolve o contexto de empresa por email com fallback para single-tenant:
+     * 1) empresa padrão; 2) primeira empresa ativa; 3) id do próprio usuário.
+     */
+    @Transactional(readOnly = true)
+    public Optional<Integer> obterIdEmpresaContextoPorEmail(String email) {
+        if (email == null || email.isBlank()) {
+            return Optional.empty();
+        }
+
+        Optional<Usuario> usuarioOpt = usuarioRepository.findByEmail(email);
+        if (usuarioOpt.isEmpty()) {
+            return Optional.empty();
+        }
+
+        Usuario usuario = usuarioOpt.get();
+
+        Optional<Integer> empresaPadrao = empresaUsuarioRepository.findEmpresaPadraoByUsuarioId(usuario.getId())
+                .map(EmpresaUsuario::getIdEmpresa)
+                .filter(id -> id != null && id > 0);
+        if (empresaPadrao.isPresent()) {
+            return empresaPadrao;
+        }
+
+        Optional<Integer> primeiraAtiva = empresaUsuarioRepository.findAllByUsuarioId(usuario.getId()).stream()
+                .map(EmpresaUsuario::getIdEmpresa)
+                .filter(id -> id != null && id > 0)
+                .findFirst();
+        if (primeiraAtiva.isPresent()) {
+            return primeiraAtiva;
+        }
+
+        // Fluxo single-tenant: cada usuário corresponde à sua própria empresa.
+        long usuarioId = usuario.getId() != null ? usuario.getId() : -1L;
+        if (usuarioId > 0 && usuarioId <= Integer.MAX_VALUE) {
+            return Optional.of((int) usuarioId);
+        }
+
+        return Optional.empty();
+    }
+
 
     private Usuario validarUsuarioExiste(Long usuarioId) {
         if (usuarioId == null || usuarioId <= 0) {
@@ -453,6 +511,30 @@ public class UsuarioEmpresaService {
                     log.error("Usuário não encontrado: {}", usuarioId);
                     return new IllegalArgumentException("Usuário não encontrado");
                 });
+    }
+
+    private Optional<EmpresaUsuarioDTO> empresaFallbackSingleTenant(Usuario usuario) {
+        if (usuario == null || usuario.getId() == null) {
+            return Optional.empty();
+        }
+        long usuarioId = usuario.getId();
+        if (usuarioId <= 0 || usuarioId > Integer.MAX_VALUE) {
+            return Optional.empty();
+        }
+
+        String nomeEmpresa = usuario.getNome() != null && !usuario.getNome().isBlank()
+                ? usuario.getNome().trim()
+                : (usuario.getEmail() != null && !usuario.getEmail().isBlank()
+                    ? usuario.getEmail().trim()
+                    : "Empresa " + usuarioId);
+
+        return Optional.of(EmpresaUsuarioDTO.builder()
+                .id(null)
+                .idEmpresa((int) usuarioId)
+                .nomeEmpresa(nomeEmpresa)
+                .padrao(true)
+                .ativo(true)
+                .build());
     }
 
     private EmpresaUsuarioDTO toDTO(EmpresaUsuario entity) {

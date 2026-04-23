@@ -10,6 +10,7 @@ import org.springframework.data.annotation.LastModifiedDate;
 import org.springframework.data.jpa.domain.support.AuditingEntityListener;
 
 import java.time.LocalDateTime;
+import java.math.BigDecimal;
 
 /**
  * Configuração por empresa (id_empresa do Bom Controle).
@@ -63,6 +64,12 @@ public class EmpresaConfig {
 
     @Column(name = "telefone_empresa", length = 40)
     private String telefoneEmpresa;
+
+    @Column(name = "taxa_cartao_credito", precision = 7, scale = 4)
+    private BigDecimal taxaCartaoCredito;
+
+    @Column(name = "taxa_antecipacao_credito", precision = 7, scale = 4)
+    private BigDecimal taxaAntecipacaoCredito;
 
     @CreatedDate
     @Column(name = "data_criacao", nullable = false, updatable = false)

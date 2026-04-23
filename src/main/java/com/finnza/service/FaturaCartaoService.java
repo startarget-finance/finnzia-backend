@@ -1,6 +1,8 @@
 package com.finnza.service;
 
+import com.finnza.domain.entity.CartaoCreditoEmpresa;
 import com.finnza.domain.entity.MovimentacaoFinanceira;
+import com.finnza.repository.CartaoCreditoEmpresaRepository;
 import com.finnza.repository.MovimentacaoFinanceiraRepository;
 import org.springframework.stereotype.Service;
 
@@ -24,9 +26,13 @@ public class FaturaCartaoService {
 
     private static final DateTimeFormatter DATE_BR = DateTimeFormatter.ofPattern("dd/MM/yyyy");
     private final MovimentacaoFinanceiraRepository movimentacaoRepo;
+    private final CartaoCreditoEmpresaRepository cartaoRepo;
 
-    public FaturaCartaoService(MovimentacaoFinanceiraRepository movimentacaoRepo) {
+    public FaturaCartaoService(
+            MovimentacaoFinanceiraRepository movimentacaoRepo,
+            CartaoCreditoEmpresaRepository cartaoRepo) {
         this.movimentacaoRepo = movimentacaoRepo;
+        this.cartaoRepo = cartaoRepo;
     }
 
     public List<Map<String, Object>> listarCartoesResumo(Integer idEmpresa) {
@@ -38,6 +44,11 @@ public class FaturaCartaoService {
                 .stream()
                 .filter(m -> Boolean.TRUE.equals(m.getDebito()))
                 .collect(Collectors.toList());
+
+        List<CartaoCreditoEmpresa> cadastrados = cartaoRepo.findByIdEmpresaAndAtivoTrueOrderByNomeAsc(idEmpresa);
+        if (!cadastrados.isEmpty()) {
+            return construirCartoesCadastrados(cadastrados, despesas);
+        }
 
         Map<String, List<MovimentacaoFinanceira>> porCartao = despesas.stream()
                 .collect(Collectors.groupingBy(this::nomeCartaoResolvido, LinkedHashMap::new, Collectors.toList()));
@@ -70,6 +81,62 @@ public class FaturaCartaoService {
 
         cartoes.sort(Comparator.comparing(c -> String.valueOf(c.get("nome"))));
         return cartoes;
+    }
+
+    public List<Map<String, Object>> listarCartoesCadastrados(Integer idEmpresa) {
+        return cartaoRepo.findByIdEmpresaAndAtivoTrueOrderByNomeAsc(idEmpresa).stream()
+                .map(c -> {
+                    Map<String, Object> map = new LinkedHashMap<>();
+                    map.put("id", c.getId());
+                    map.put("nome", c.getNome());
+                    map.put("bandeira", c.getBandeira());
+                    map.put("finalCartao", c.getFinalCartao());
+                    map.put("limite", c.getLimite());
+                    map.put("diaFechamento", c.getDiaFechamento());
+                    map.put("diaVencimento", c.getDiaVencimento());
+                    map.put("contaReferencia", c.getContaReferencia());
+                    map.put("ativo", c.getAtivo());
+                    return map;
+                })
+                .collect(Collectors.toList());
+    }
+
+    public Map<String, Object> criarCartao(Integer idEmpresa, Map<String, Object> payload) {
+        CartaoCreditoEmpresa c = CartaoCreditoEmpresa.builder()
+                .idEmpresa(idEmpresa)
+                .nome(sanitize(payload.get("nome")))
+                .bandeira(sanitize(payload.get("bandeira")))
+                .finalCartao(sanitize(payload.get("finalCartao")))
+                .limite(parseBigDecimal(String.valueOf(payload.getOrDefault("limite", "0"))))
+                .diaFechamento(parseInt(payload.get("diaFechamento")))
+                .diaVencimento(parseInt(payload.get("diaVencimento")))
+                .contaReferencia(sanitize(payload.get("contaReferencia")))
+                .ativo(true)
+                .build();
+        validarCartao(c);
+        CartaoCreditoEmpresa saved = cartaoRepo.save(c);
+        return Map.of("id", saved.getId());
+    }
+
+    public void atualizarCartao(Integer idEmpresa, Long id, Map<String, Object> payload) {
+        CartaoCreditoEmpresa c = cartaoRepo.findByIdAndIdEmpresa(id, idEmpresa)
+                .orElseThrow(() -> new IllegalArgumentException("Cartão não encontrado"));
+        c.setNome(sanitize(payload.get("nome")));
+        c.setBandeira(sanitize(payload.get("bandeira")));
+        c.setFinalCartao(sanitize(payload.get("finalCartao")));
+        c.setLimite(parseBigDecimal(String.valueOf(payload.getOrDefault("limite", "0"))));
+        c.setDiaFechamento(parseInt(payload.get("diaFechamento")));
+        c.setDiaVencimento(parseInt(payload.get("diaVencimento")));
+        c.setContaReferencia(sanitize(payload.get("contaReferencia")));
+        validarCartao(c);
+        cartaoRepo.save(c);
+    }
+
+    public void removerCartao(Integer idEmpresa, Long id) {
+        CartaoCreditoEmpresa c = cartaoRepo.findByIdAndIdEmpresa(id, idEmpresa)
+                .orElseThrow(() -> new IllegalArgumentException("Cartão não encontrado"));
+        c.setAtivo(false);
+        cartaoRepo.save(c);
     }
 
     public Map<String, Object> importarCsv(String csvContent) {
@@ -126,6 +193,52 @@ public class FaturaCartaoService {
         String conta = mov.getNomeContaFinanceira();
         if (conta != null && !conta.isBlank()) return conta.trim();
         return "Cartao sem identificacao";
+    }
+
+    private List<Map<String, Object>> construirCartoesCadastrados(
+            List<CartaoCreditoEmpresa> cadastrados,
+            List<MovimentacaoFinanceira> despesas
+    ) {
+        List<YearMonth> meses = construirJanelaMeses(7);
+        List<Map<String, Object>> cartoes = new ArrayList<>();
+
+        for (CartaoCreditoEmpresa cadastro : cadastrados) {
+            String nome = cadastro.getNome() != null ? cadastro.getNome().trim() : "";
+            List<MovimentacaoFinanceira> items = despesas.stream()
+                    .filter(m -> combinaCartao(cadastro, m))
+                    .collect(Collectors.toList());
+            Map<YearMonth, BigDecimal> totalMes = somarPorMes(items);
+            BigDecimal limite = cadastro.getLimite() != null
+                    ? cadastro.getLimite().setScale(2, RoundingMode.HALF_UP)
+                    : totalMes.values().stream().reduce(BigDecimal.ZERO, BigDecimal::max)
+                        .multiply(new BigDecimal("1.2")).setScale(2, RoundingMode.HALF_UP);
+            YearMonth atual = YearMonth.now();
+            BigDecimal gastoAtual = totalMes.getOrDefault(atual, BigDecimal.ZERO);
+            BigDecimal disponivel = limite.subtract(gastoAtual).setScale(2, RoundingMode.HALF_UP);
+
+            Map<String, Object> c = new LinkedHashMap<>();
+            c.put("id", cadastro.getId().intValue());
+            c.put("nome", nome);
+            c.put("empresa", "-");
+            c.put("limite", limite);
+            c.put("disponivel", disponivel);
+            c.put("contaBancariaNome", cadastro.getContaReferencia());
+            c.put("pontos", construirPontos(meses, totalMes));
+            cartoes.add(c);
+        }
+        return cartoes;
+    }
+
+    private boolean combinaCartao(CartaoCreditoEmpresa cadastro, MovimentacaoFinanceira mov) {
+        String nomeConta = mov.getNomeContaFinanceira() != null ? mov.getNomeContaFinanceira().toLowerCase(Locale.ROOT) : "";
+        String contaRef = cadastro.getContaReferencia() != null ? cadastro.getContaReferencia().toLowerCase(Locale.ROOT) : "";
+        String nome = cadastro.getNome() != null ? cadastro.getNome().toLowerCase(Locale.ROOT) : "";
+        String finalCartao = cadastro.getFinalCartao() != null ? cadastro.getFinalCartao().trim() : "";
+
+        boolean matchConta = !contaRef.isBlank() && nomeConta.contains(contaRef);
+        boolean matchNome = !nome.isBlank() && nomeConta.contains(nome);
+        boolean matchFinal = !finalCartao.isBlank() && nomeConta.contains(finalCartao);
+        return matchConta || matchNome || matchFinal;
     }
 
     private String resolverEmpresa(List<MovimentacaoFinanceira> items) {
@@ -227,6 +340,36 @@ public class FaturaCartaoService {
             return new BigDecimal(limpo);
         } catch (Exception e) {
             return BigDecimal.ZERO;
+        }
+    }
+
+    private Integer parseInt(Object value) {
+        if (value == null) return null;
+        try {
+            return Integer.parseInt(String.valueOf(value).trim());
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private String sanitize(Object value) {
+        if (value == null) return null;
+        String out = String.valueOf(value).trim();
+        return out.isBlank() ? null : out;
+    }
+
+    private void validarCartao(CartaoCreditoEmpresa c) {
+        if (c.getNome() == null || c.getNome().isBlank()) {
+            throw new IllegalArgumentException("Nome do cartão é obrigatório");
+        }
+        if (c.getDiaFechamento() != null && (c.getDiaFechamento() < 1 || c.getDiaFechamento() > 31)) {
+            throw new IllegalArgumentException("Dia de fechamento deve estar entre 1 e 31");
+        }
+        if (c.getDiaVencimento() != null && (c.getDiaVencimento() < 1 || c.getDiaVencimento() > 31)) {
+            throw new IllegalArgumentException("Dia de vencimento deve estar entre 1 e 31");
+        }
+        if (c.getFinalCartao() != null && !c.getFinalCartao().matches("\\d{4}")) {
+            throw new IllegalArgumentException("Final do cartão deve conter 4 dígitos");
         }
     }
 

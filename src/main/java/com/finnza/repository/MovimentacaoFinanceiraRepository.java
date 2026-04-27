@@ -17,6 +17,8 @@ import java.util.Optional;
 @Repository
 public interface MovimentacaoFinanceiraRepository extends JpaRepository<MovimentacaoFinanceira, String> {
 
+    Optional<MovimentacaoFinanceira> findByIdMovimentacaoAndIdEmpresa(String idMovimentacao, Integer idEmpresa);
+
     // ── Por vencimento ────────────────────────────────────────────────────────
 
     @Query("""

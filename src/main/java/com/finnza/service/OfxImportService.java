@@ -59,6 +59,22 @@ public class OfxImportService {
 
     @Transactional
     public ImportResumo importar(InputStream ofxStream, Integer idEmpresa, String nomeArquivo, String tipoImportacao) {
+        return importar(ofxStream, idEmpresa, nomeArquivo, tipoImportacao, null, null);
+    }
+
+    /**
+     * @param idContaFinanceiraVinculo opcional — id da conta bancária cadastrada no Finnzia (grava em {@code idContaFinanceira})
+     * @param nomeContaFinanceiraPreferida opcional — nome amigável (ex.: nome curto do cadastro); se ausente, usa o número do OFX
+     */
+    @Transactional
+    public ImportResumo importar(
+            InputStream ofxStream,
+            Integer idEmpresa,
+            String nomeArquivo,
+            String tipoImportacao,
+            Integer idContaFinanceiraVinculo,
+            String nomeContaFinanceiraPreferida
+    ) {
         Objects.requireNonNull(ofxStream, "ofxStream");
         if (idEmpresa == null || idEmpresa <= 0) {
             throw new IllegalArgumentException("idEmpresa inválido");
@@ -74,7 +90,14 @@ public class OfxImportService {
             if (msgSet instanceof BankingResponseMessageSet banking) {
                 for (BankStatementResponseTransaction txResp : banking.getStatementResponses()) {
                     BankStatementResponse stmt = txResp.getMessage();
-                    candidatos.addAll(mapStatement(idEmpresa, null, stmt.getAccount().getAccountNumber(), stmt.getCurrencyCode(), stmt.getTransactionList().getTransactions()));
+                    candidatos.addAll(mapStatement(
+                            idEmpresa,
+                            null,
+                            stmt.getAccount() != null ? stmt.getAccount().getAccountNumber() : null,
+                            idContaFinanceiraVinculo,
+                            nomeContaFinanceiraPreferida,
+                            stmt.getCurrencyCode(),
+                            stmt.getTransactionList().getTransactions()));
                 }
             }
         } catch (Exception e) {
@@ -88,7 +111,14 @@ public class OfxImportService {
                 for (CreditCardStatementResponseTransaction txResp : cc.getStatementResponses()) {
                     CreditCardStatementResponse stmt = txResp.getMessage();
                     String conta = stmt.getAccount() != null ? stmt.getAccount().getAccountNumber() : null;
-                    candidatos.addAll(mapStatement(idEmpresa, null, conta, stmt.getCurrencyCode(), stmt.getTransactionList().getTransactions()));
+                    candidatos.addAll(mapStatement(
+                            idEmpresa,
+                            null,
+                            conta,
+                            idContaFinanceiraVinculo,
+                            nomeContaFinanceiraPreferida,
+                            stmt.getCurrencyCode(),
+                            stmt.getTransactionList().getTransactions()));
                 }
             }
         } catch (Exception e) {
@@ -107,7 +137,9 @@ public class OfxImportService {
 
         LocalDate min = candidatos.stream().map(MovimentacaoFinanceira::getDataVencimento).filter(Objects::nonNull).min(LocalDate::compareTo).orElse(null);
         LocalDate max = candidatos.stream().map(MovimentacaoFinanceira::getDataVencimento).filter(Objects::nonNull).max(LocalDate::compareTo).orElse(null);
-        String conta = candidatos.stream().map(MovimentacaoFinanceira::getNomeContaFinanceira).filter(Objects::nonNull).findFirst().orElse(null);
+        String conta = firstNonBlank(
+                nomeContaFinanceiraPreferida,
+                candidatos.stream().map(MovimentacaoFinanceira::getNomeContaFinanceira).filter(Objects::nonNull).findFirst().orElse(null));
 
         OfxImportacao importacao = ofxImportacaoRepository.save(OfxImportacao.builder()
                 .idEmpresa(idEmpresa)
@@ -253,7 +285,9 @@ public class OfxImportService {
     private List<MovimentacaoFinanceira> mapStatement(
             Integer idEmpresa,
             Long ofxImportacaoId,
-            String accountNumber,
+            String accountNumberFromOfx,
+            Integer idContaFinanceiraVinculo,
+            String nomeContaFinanceiraPreferida,
             String currencyCode,
             List<?> txs
     ) {
@@ -277,6 +311,15 @@ public class OfxImportService {
             String fitId = firstNonBlank(t.getId(), t.getCheckNumber());
             String idMov = buildId(idEmpresa, fitId, posted, valor, idx);
 
+            String rawAcct = accountNumberFromOfx != null ? accountNumberFromOfx.trim() : null;
+            String nomeContaFin = firstNonBlank(nomeContaFinanceiraPreferida, rawAcct, "Conta OFX");
+            String observacaoConta = null;
+            if (rawAcct != null && !rawAcct.isBlank()
+                    && nomeContaFin != null
+                    && !rawAcct.equalsIgnoreCase(nomeContaFin)) {
+                observacaoConta = "Identificador da conta no arquivo OFX: " + rawAcct;
+            }
+
             MovimentacaoFinanceira m = MovimentacaoFinanceira.builder()
                     .idMovimentacao(idMov)
                     .idEmpresa(idEmpresa)
@@ -292,13 +335,15 @@ public class OfxImportService {
                     .tipoMovimentacao(null)
                     .nomeTipoMovimentacao(null)
                     .nome(memo != null ? memo : "Movimentação OFX")
-                    .observacao(null)
+                    .observacao(observacaoConta)
                     .numeroParcela(1)
                     .quantidadeParcela(1)
                     .idCategoriaFinanceira(null)
                     .nomeCategoriaFinanceira(null)
-                    .idContaFinanceira(null)
-                    .nomeContaFinanceira(accountNumber)
+                    .idContaFinanceira(idContaFinanceiraVinculo != null && idContaFinanceiraVinculo > 0
+                            ? idContaFinanceiraVinculo
+                            : null)
+                    .nomeContaFinanceira(nomeContaFin)
                     .nomeEmpresa(null)
                     .idCliente(null)
                     .idFornecedor(null)

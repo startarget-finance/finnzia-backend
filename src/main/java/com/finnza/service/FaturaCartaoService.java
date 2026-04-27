@@ -50,37 +50,9 @@ public class FaturaCartaoService {
             return construirCartoesCadastrados(cadastrados, despesas);
         }
 
-        Map<String, List<MovimentacaoFinanceira>> porCartao = despesas.stream()
-                .collect(Collectors.groupingBy(this::nomeCartaoResolvido, LinkedHashMap::new, Collectors.toList()));
-
-        List<YearMonth> meses = construirJanelaMeses(7);
-        List<Map<String, Object>> cartoes = new ArrayList<>();
-        long seq = 1;
-
-        for (Map.Entry<String, List<MovimentacaoFinanceira>> entry : porCartao.entrySet()) {
-            List<MovimentacaoFinanceira> items = entry.getValue();
-            Map<YearMonth, BigDecimal> totalMes = somarPorMes(items);
-            BigDecimal pico = totalMes.values().stream().reduce(BigDecimal.ZERO, BigDecimal::max);
-            BigDecimal limiteEstimado = pico.compareTo(BigDecimal.ZERO) > 0
-                    ? pico.multiply(new BigDecimal("1.2")).setScale(2, RoundingMode.HALF_UP)
-                    : BigDecimal.ZERO;
-
-            YearMonth atual = YearMonth.now();
-            BigDecimal gastoAtual = totalMes.getOrDefault(atual, BigDecimal.ZERO);
-            BigDecimal disponivel = limiteEstimado.subtract(gastoAtual).setScale(2, RoundingMode.HALF_UP);
-
-            Map<String, Object> c = new HashMap<>();
-            c.put("id", seq++);
-            c.put("nome", entry.getKey());
-            c.put("empresa", resolverEmpresa(items));
-            c.put("limite", limiteEstimado);
-            c.put("disponivel", disponivel);
-            c.put("pontos", construirPontos(meses, totalMes));
-            cartoes.add(c);
-        }
-
-        cartoes.sort(Comparator.comparing(c -> String.valueOf(c.get("nome"))));
-        return cartoes;
+        // Sem cartões cadastrados em Parametrização: não inferir "cartões" a partir de NomeContaFinanceira
+        // (evita misturar conta corrente com fatura de cartão).
+        return List.of();
     }
 
     public List<Map<String, Object>> listarCartoesCadastrados(Integer idEmpresa) {
@@ -189,12 +161,6 @@ public class FaturaCartaoService {
         );
     }
 
-    private String nomeCartaoResolvido(MovimentacaoFinanceira mov) {
-        String conta = mov.getNomeContaFinanceira();
-        if (conta != null && !conta.isBlank()) return conta.trim();
-        return "Cartao sem identificacao";
-    }
-
     private List<Map<String, Object>> construirCartoesCadastrados(
             List<CartaoCreditoEmpresa> cadastrados,
             List<MovimentacaoFinanceira> despesas
@@ -229,24 +195,36 @@ public class FaturaCartaoService {
         return cartoes;
     }
 
+    /**
+     * Associa despesa ao cartão cadastrado usando texto do lançamento (histórico/observação),
+     * não {@code NomeContaFinanceira} — evita somar toda a conta corrente quando "conta referência"
+     * coincide com o nome da conta bancária.
+     */
     private boolean combinaCartao(CartaoCreditoEmpresa cadastro, MovimentacaoFinanceira mov) {
-        String nomeConta = mov.getNomeContaFinanceira() != null ? mov.getNomeContaFinanceira().toLowerCase(Locale.ROOT) : "";
-        String contaRef = cadastro.getContaReferencia() != null ? cadastro.getContaReferencia().toLowerCase(Locale.ROOT) : "";
-        String nome = cadastro.getNome() != null ? cadastro.getNome().toLowerCase(Locale.ROOT) : "";
+        String textoMov = textoMovimentoParaCorrespondencia(mov);
+        String nomeCad = cadastro.getNome() != null ? cadastro.getNome().trim().toLowerCase(Locale.ROOT) : "";
         String finalCartao = cadastro.getFinalCartao() != null ? cadastro.getFinalCartao().trim() : "";
+        String contaRef = cadastro.getContaReferencia() != null ? cadastro.getContaReferencia().trim().toLowerCase(Locale.ROOT) : "";
 
-        boolean matchConta = !contaRef.isBlank() && nomeConta.contains(contaRef);
-        boolean matchNome = !nome.isBlank() && nomeConta.contains(nome);
-        boolean matchFinal = !finalCartao.isBlank() && nomeConta.contains(finalCartao);
-        return matchConta || matchNome || matchFinal;
+        boolean matchNome = nomeCad.length() >= 3 && !textoMov.isEmpty() && textoMov.contains(nomeCad);
+
+        boolean matchFinal = finalCartao.length() == 4
+                && finalCartao.chars().allMatch(Character::isDigit)
+                && !textoMov.isEmpty()
+                && textoMov.contains(finalCartao);
+
+        boolean matchRefCurta = false;
+        if (!contaRef.isEmpty() && !textoMov.isEmpty() && contaRef.matches("^\\d{4,8}$")) {
+            matchRefCurta = textoMov.contains(contaRef);
+        }
+
+        return matchNome || matchFinal || matchRefCurta;
     }
 
-    private String resolverEmpresa(List<MovimentacaoFinanceira> items) {
-        return items.stream()
-                .map(MovimentacaoFinanceira::getNomeEmpresa)
-                .filter(v -> v != null && !v.isBlank())
-                .findFirst()
-                .orElse("-");
+    private static String textoMovimentoParaCorrespondencia(MovimentacaoFinanceira mov) {
+        String n = mov.getNome() != null ? mov.getNome() : "";
+        String o = mov.getObservacao() != null ? mov.getObservacao() : "";
+        return (n + " " + o).toLowerCase(Locale.ROOT).replaceAll("\\s+", " ").trim();
     }
 
     private Map<YearMonth, BigDecimal> somarPorMes(List<MovimentacaoFinanceira> items) {

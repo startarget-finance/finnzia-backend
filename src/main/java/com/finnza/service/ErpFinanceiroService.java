@@ -87,6 +87,49 @@ public class ErpFinanceiroService {
     }
 
     /**
+     * Atualiza lançamento existente da empresa. Lançamentos OFX ainda não aprovados não podem ser editados.
+     */
+    public Map<String, Object> atualizarMovimentacaoManual(
+            Integer idEmpresa,
+            String idMovimentacao,
+            Boolean debito,
+            LocalDate dataVencimento,
+            LocalDate dataCompetencia,
+            LocalDate dataQuitacao,
+            BigDecimal valor,
+            String nome,
+            String observacao,
+            String nomeCategoriaFinanceira,
+            String nomeContaFinanceira,
+            String nomeClienteFornecedor
+    ) {
+        MovimentacaoFinanceira mov = movimentacaoRepo
+                .findByIdMovimentacaoAndIdEmpresa(idMovimentacao, idEmpresa)
+                .orElseThrow(() -> new IllegalArgumentException("Movimentação não encontrada"));
+        if (Boolean.FALSE.equals(mov.getOfxAprovado())) {
+            throw new IllegalArgumentException("Lançamento importado ainda pendente de aprovação e não pode ser editado.");
+        }
+        String contaTrim = nomeContaFinanceira == null || nomeContaFinanceira.isBlank()
+                ? null
+                : nomeContaFinanceira.trim();
+        mov.setDebito(Boolean.TRUE.equals(debito));
+        mov.setDataVencimento(dataVencimento);
+        mov.setDataCompetencia(dataCompetencia != null ? dataCompetencia : dataVencimento);
+        mov.setDataQuitacao(dataQuitacao);
+        mov.setValor(valor);
+        mov.setNome(nome);
+        mov.setObservacao(observacao);
+        mov.setNomeCategoriaFinanceira(nomeCategoriaFinanceira);
+        mov.setNomeContaFinanceira(contaTrim);
+        mov.setNomeClienteFornecedor(nomeClienteFornecedor);
+        mov.setNomeTipoMovimentacao(Boolean.TRUE.equals(debito) ? "Despesa" : "Receita");
+        mov.setStatusPagamento(dataQuitacao != null ? "pago" : "pendente");
+        mov.setSincronizadoEm(LocalDateTime.now());
+        MovimentacaoFinanceira saved = movimentacaoRepo.save(mov);
+        return entityToMap(saved);
+    }
+
+    /**
      * Busca movimentações no banco local no formato esperado pelo frontend.
      * orderBy: "data" | "valor" | "status" | "tipo" (campo da entidade: dataVencimento, valor, statusPagamento, debito)
      * orderDirection: "asc" | "desc"

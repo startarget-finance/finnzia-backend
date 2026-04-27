@@ -329,6 +329,112 @@ public class ErpFinanceiroController {
         }
     }
 
+    @PutMapping("/movimentacoes/{id}")
+    @PreAuthorize("hasPermission(null, 'MOVIMENTACOES')")
+    public ResponseEntity<?> atualizarMovimentacao(
+            @PathVariable("id") String idMovimentacao,
+            @RequestHeader(value = "X-Empresa-Id", required = false) String headerEmpresaId,
+            @RequestBody CriarMovimentacaoRequest request
+    ) {
+        Integer idEmpresa = resolverEmpresaId(headerEmpresaId);
+        if (idEmpresa == null) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "erro", true,
+                    "mensagem", "Não foi possível identificar a empresa para esta requisição"
+            ));
+        }
+        if (!validarAcessoEmpresa(idEmpresa)) {
+            return ResponseEntity.status(403).body(Map.of(
+                    "erro", true,
+                    "mensagem", "Você não tem permissão de acessar esta empresa"
+            ));
+        }
+        if (idMovimentacao == null || idMovimentacao.isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "erro", true,
+                    "mensagem", "Identificador da movimentação é obrigatório"
+            ));
+        }
+        if (request == null) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "erro", true,
+                    "mensagem", "Dados da movimentação não informados"
+            ));
+        }
+        if (request.valor() == null || request.valor().compareTo(BigDecimal.ZERO) <= 0) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "erro", true,
+                    "mensagem", "Valor deve ser maior que zero"
+            ));
+        }
+        if (request.nome() == null || request.nome().isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "erro", true,
+                    "mensagem", "Descrição é obrigatória"
+            ));
+        }
+        if (request.nomeCategoriaFinanceira() == null || request.nomeCategoriaFinanceira().isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "erro", true,
+                    "mensagem", "Categoria é obrigatória"
+            ));
+        }
+        if (request.dataVencimento() == null || request.dataVencimento().isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "erro", true,
+                    "mensagem", "Data de vencimento é obrigatória"
+            ));
+        }
+
+        try {
+            LocalDate dataVencimento = LocalDate.parse(request.dataVencimento());
+            LocalDate dataCompetencia = request.dataCompetencia() == null || request.dataCompetencia().isBlank()
+                    ? dataVencimento
+                    : LocalDate.parse(request.dataCompetencia());
+            LocalDate dataQuitacao = request.dataQuitacao() == null || request.dataQuitacao().isBlank()
+                    ? null
+                    : LocalDate.parse(request.dataQuitacao());
+
+            Map<String, Object> atualizada = erpFinanceiroService.atualizarMovimentacaoManual(
+                    idEmpresa,
+                    idMovimentacao,
+                    request.debito(),
+                    dataVencimento,
+                    dataCompetencia,
+                    dataQuitacao,
+                    request.valor(),
+                    request.nome().trim(),
+                    request.observacao(),
+                    request.nomeCategoriaFinanceira().trim(),
+                    request.nomeContaFinanceira(),
+                    request.nomeClienteFornecedor()
+            );
+
+            return ResponseEntity.ok(Map.of(
+                    "erro", false,
+                    "mensagem", "Movimentação atualizada com sucesso",
+                    "movimentacao", atualizada
+            ));
+        } catch (IllegalArgumentException e) {
+            String msg = e.getMessage() != null ? e.getMessage() : "Não foi possível atualizar";
+            if (msg.contains("não encontrada")) {
+                return ResponseEntity.status(404).body(Map.of(
+                        "erro", true,
+                        "mensagem", msg
+                ));
+            }
+            return ResponseEntity.badRequest().body(Map.of(
+                    "erro", true,
+                    "mensagem", msg
+            ));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "erro", true,
+                    "mensagem", "Não foi possível atualizar a movimentação: " + e.getMessage()
+            ));
+        }
+    }
+
     @GetMapping("/resumo-financeiro")
     @PreAuthorize("hasPermission(null, 'MOVIMENTACOES')")
     public ResponseEntity<?> obterResumoFinanceiro(
@@ -391,6 +497,8 @@ public class ErpFinanceiroController {
     public ResponseEntity<?> importarOfx(
             @RequestHeader(value = "X-Empresa-Id", required = false) String headerEmpresaId,
             @RequestParam(value = "tipo", required = false, defaultValue = "MANUAL") String tipo,
+            @RequestParam(value = "idContaBancaria", required = false) Integer idContaBancaria,
+            @RequestParam(value = "nomeContaExibicao", required = false) String nomeContaExibicao,
             @RequestPart("file") MultipartFile file
     ) {
         Integer idEmpresa = resolverEmpresaId(headerEmpresaId);
@@ -413,7 +521,17 @@ public class ErpFinanceiroController {
             ));
         }
         try (var is = file.getInputStream()) {
-            var resumo = ofxImportService.importar(is, idEmpresa, file.getOriginalFilename(), tipo);
+            String nomeExibicao = nomeContaExibicao != null ? nomeContaExibicao.trim() : null;
+            if (nomeExibicao != null && nomeExibicao.length() > 500) {
+                nomeExibicao = nomeExibicao.substring(0, 500);
+            }
+            var resumo = ofxImportService.importar(
+                    is,
+                    idEmpresa,
+                    file.getOriginalFilename(),
+                    tipo,
+                    idContaBancaria,
+                    nomeExibicao);
             Map<String, Object> body = new java.util.LinkedHashMap<>();
             body.put("erro", false);
             body.put("importacaoId", resumo.importacaoId());

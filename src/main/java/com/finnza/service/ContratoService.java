@@ -453,8 +453,12 @@ public class ContratoService {
         }
 
         // Sincronizar cobranças
+        boolean rateLimitAtingido = false;
         if (contrato.getCobrancas() != null && !contrato.getCobrancas().isEmpty()) {
             for (Cobranca cobranca : contrato.getCobrancas()) {
+                if (rateLimitAtingido) {
+                    break;
+                }
                 if (cobranca.getAsaasPaymentId() != null && !cobranca.getAsaasPaymentId().isEmpty()) {
                     try {
                         Map<String, Object> paymentData = asaasService.consultarCobranca(cobranca.getAsaasPaymentId());
@@ -488,6 +492,10 @@ public class ContratoService {
                         
                         cobrancaRepository.save(cobranca);
                         log.info("Cobrança {} sincronizada com Asaas. Status: {}", cobranca.getId(), statusAsaas);
+                    } catch (AsaasRateLimitException e) {
+                        rateLimitAtingido = true;
+                        log.warn("Rate limit do Asaas atingido na sincronização do contrato {}. Interrompendo lote.",
+                                contrato.getId());
                     } catch (Exception e) {
                         log.warn("Erro ao sincronizar cobrança {} com Asaas: {}", cobranca.getId(), e.getMessage());
                     }
@@ -623,8 +631,12 @@ public class ContratoService {
     private void sincronizarCobrancasComAsaas(Contrato contrato) {
         LocalDate hoje = LocalDate.now();
         boolean algumaCobrancaAtualizada = false;
+        boolean rateLimitAtingido = false;
         
         for (Cobranca cobranca : contrato.getCobrancas()) {
+            if (rateLimitAtingido) {
+                break;
+            }
             // Sincronizar apenas cobranças que têm ID do Asaas
             if (cobranca.getAsaasPaymentId() != null && !cobranca.getAsaasPaymentId().isEmpty()) {
                 boolean deveSincronizar = false;
@@ -684,6 +696,10 @@ public class ContratoService {
                             
                             cobrancaRepository.save(cobranca);
                         }
+                    } catch (AsaasRateLimitException e) {
+                        rateLimitAtingido = true;
+                        log.warn("Rate limit do Asaas atingido ao sincronizar contrato {}. Parando novas consultas neste ciclo.",
+                                contrato.getId());
                     } catch (Exception e) {
                         // Não falha o processo se uma cobrança não conseguir sincronizar
                         log.warn("Erro ao sincronizar cobrança {} com Asaas: {}", cobranca.getId(), e.getMessage());
@@ -1326,7 +1342,11 @@ public class ContratoService {
         int cobrancasAtualizadas = 0;
         int erros = 0;
         
+        boolean rateLimitAtingido = false;
         for (Contrato contrato : todosContratos) {
+            if (rateLimitAtingido) {
+                break;
+            }
             try {
                 // Forçar carregamento das cobranças
                 if (contrato.getCobrancas() != null) {
@@ -1337,6 +1357,9 @@ public class ContratoService {
                 
                 if (contrato.getCobrancas() != null && !contrato.getCobrancas().isEmpty()) {
                     for (Cobranca cobranca : contrato.getCobrancas()) {
+                        if (rateLimitAtingido) {
+                            break;
+                        }
                         if (cobranca.getAsaasPaymentId() != null && !cobranca.getAsaasPaymentId().isEmpty()) {
                             try {
                                 Map<String, Object> paymentData = asaasService.consultarCobranca(cobranca.getAsaasPaymentId());
@@ -1380,6 +1403,9 @@ public class ContratoService {
                                 }
                                 
                                 cobrancaRepository.save(cobranca);
+                            } catch (AsaasRateLimitException e) {
+                                rateLimitAtingido = true;
+                                log.warn("Rate limit do Asaas atingido durante sincronização total. Interrompendo processamento para evitar loop.");
                             } catch (Exception e) {
                                 log.warn("Erro ao sincronizar cobrança {} com Asaas: {}", cobranca.getId(), e.getMessage());
                                 erros++;

@@ -2,6 +2,7 @@ package com.finnza.controller;
 
 import com.finnza.dto.response.DfcResponseDTO;
 import com.finnza.dto.response.ResumoFinanceiroDTO;
+import com.finnza.service.MovimentacaoHistoricoService;
 import com.finnza.service.ErpFinanceiroService;
 import com.finnza.service.OfxImportService;
 import com.finnza.service.UsuarioEmpresaService;
@@ -51,6 +52,7 @@ public class ErpFinanceiroController {
     ) {}
 
     private final ErpFinanceiroService erpFinanceiroService;
+    private final MovimentacaoHistoricoService movimentacaoHistoricoService;
     private final UsuarioEmpresaService usuarioEmpresaService;
     private final OfxImportService ofxImportService;
 
@@ -315,6 +317,21 @@ public class ErpFinanceiroController {
                     request.nomeContaFinanceira(),
                     request.nomeClienteFornecedor()
             );
+            String idOrigem = String.valueOf(novaMov.getOrDefault("IdMovimentacaoFinanceiraParcela", ""));
+            movimentacaoHistoricoService.registrarCriacao(
+                    idEmpresa,
+                    idOrigem,
+                    request.debito(),
+                    dataVencimento,
+                    dataCompetencia,
+                    dataQuitacao,
+                    request.valor(),
+                    request.nome().trim(),
+                    request.observacao(),
+                    request.nomeCategoriaFinanceira().trim(),
+                    request.nomeContaFinanceira(),
+                    request.nomeClienteFornecedor()
+            );
 
             return ResponseEntity.ok(Map.of(
                     "erro", false,
@@ -387,6 +404,17 @@ public class ErpFinanceiroController {
         }
 
         try {
+            var movAntes = erpFinanceiroService.buscarMovimentacao(idEmpresa, idMovimentacao).orElse(null);
+            Boolean movAntesDebito = movAntes != null ? movAntes.getDebito() : null;
+            LocalDate movAntesVencimento = movAntes != null ? movAntes.getDataVencimento() : null;
+            LocalDate movAntesCompetencia = movAntes != null ? movAntes.getDataCompetencia() : null;
+            LocalDate movAntesQuitacao = movAntes != null ? movAntes.getDataQuitacao() : null;
+            BigDecimal movAntesValor = movAntes != null ? movAntes.getValor() : null;
+            String movAntesNome = movAntes != null ? movAntes.getNome() : null;
+            String movAntesObs = movAntes != null ? movAntes.getObservacao() : null;
+            String movAntesCategoria = movAntes != null ? movAntes.getNomeCategoriaFinanceira() : null;
+            String movAntesConta = movAntes != null ? movAntes.getNomeContaFinanceira() : null;
+            String movAntesClienteFornecedor = movAntes != null ? movAntes.getNomeClienteFornecedor() : null;
             LocalDate dataVencimento = LocalDate.parse(request.dataVencimento());
             LocalDate dataCompetencia = request.dataCompetencia() == null || request.dataCompetencia().isBlank()
                     ? dataVencimento
@@ -409,6 +437,22 @@ public class ErpFinanceiroController {
                     request.nomeContaFinanceira(),
                     request.nomeClienteFornecedor()
             );
+            if (movAntes != null) {
+                movimentacaoHistoricoService.registrarEdicao(
+                        idEmpresa,
+                        idMovimentacao,
+                        movAntesDebito,
+                        movAntesVencimento,
+                        movAntesCompetencia,
+                        movAntesQuitacao,
+                        movAntesValor,
+                        movAntesNome,
+                        movAntesObs,
+                        movAntesCategoria,
+                        movAntesConta,
+                        movAntesClienteFornecedor
+                );
+            }
 
             return ResponseEntity.ok(Map.of(
                     "erro", false,
@@ -431,6 +475,85 @@ public class ErpFinanceiroController {
             return ResponseEntity.badRequest().body(Map.of(
                     "erro", true,
                     "mensagem", "Não foi possível atualizar a movimentação: " + e.getMessage()
+            ));
+        }
+    }
+
+    @GetMapping("/movimentacoes/historico")
+    @PreAuthorize("hasPermission(null, 'MOVIMENTACOES')")
+    public ResponseEntity<?> listarHistoricoMovimentacoes(
+            @RequestHeader(value = "X-Empresa-Id", required = false) String headerEmpresaId,
+            @RequestParam(required = false) String acao,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate dataInicio,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate dataFim,
+            @RequestParam(required = false, defaultValue = "20") Integer itensPorPagina,
+            @RequestParam(required = false, defaultValue = "1") Integer numeroDaPagina
+    ) {
+        Integer idEmpresa = resolverEmpresaId(headerEmpresaId);
+        if (idEmpresa == null) {
+            return ResponseEntity.ok(Map.of(
+                    "itens", List.of(),
+                    "paginacao", Map.of(
+                            "itensPorPagina", itensPorPagina,
+                            "numeroDaPagina", numeroDaPagina,
+                            "totalItens", 0,
+                            "totalPaginas", 0
+                    )
+            ));
+        }
+        if (!validarAcessoEmpresa(idEmpresa)) {
+            return ResponseEntity.status(403).body(Map.of(
+                    "erro", true,
+                    "mensagem", "Você não tem permissão de acessar esta empresa"
+            ));
+        }
+        return ResponseEntity.ok(
+                movimentacaoHistoricoService.listar(
+                        idEmpresa,
+                        acao,
+                        dataInicio,
+                        dataFim,
+                        itensPorPagina,
+                        numeroDaPagina
+                )
+        );
+    }
+
+    @PostMapping("/movimentacoes/historico/{id}/restaurar")
+    @PreAuthorize("hasPermission(null, 'MOVIMENTACOES')")
+    public ResponseEntity<?> restaurarMovimentacaoHistorico(
+            @RequestHeader(value = "X-Empresa-Id", required = false) String headerEmpresaId,
+            @PathVariable("id") Long id
+    ) {
+        Integer idEmpresa = resolverEmpresaId(headerEmpresaId);
+        if (idEmpresa == null) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "erro", true,
+                    "mensagem", "Não foi possível identificar a empresa para esta requisição"
+            ));
+        }
+        if (!validarAcessoEmpresa(idEmpresa)) {
+            return ResponseEntity.status(403).body(Map.of(
+                    "erro", true,
+                    "mensagem", "Você não tem permissão de acessar esta empresa"
+            ));
+        }
+        try {
+            Map<String, Object> mov = movimentacaoHistoricoService.restaurar(idEmpresa, id);
+            return ResponseEntity.ok(Map.of(
+                    "erro", false,
+                    "mensagem", "Movimentação restaurada com sucesso",
+                    "movimentacao", mov
+            ));
+        } catch (IllegalArgumentException ex) {
+            return ResponseEntity.status(404).body(Map.of(
+                    "erro", true,
+                    "mensagem", ex.getMessage()
+            ));
+        } catch (Exception ex) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "erro", true,
+                    "mensagem", "Não foi possível restaurar a movimentação: " + ex.getMessage()
             ));
         }
     }

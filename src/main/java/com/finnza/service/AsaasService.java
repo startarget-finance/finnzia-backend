@@ -8,6 +8,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
+import org.springframework.web.reactive.function.client.WebClientResponseException;
 import org.springframework.web.reactive.function.client.WebClient;
 
 import java.math.BigDecimal;
@@ -16,6 +17,7 @@ import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Service para integração com API do Asaas.
@@ -29,6 +31,7 @@ public class AsaasService {
     private final String baseUrl;
     private final boolean mockEnabled;
     private final EmpresaConfigRepository empresaConfigRepository;
+    private final AtomicLong rateLimitCooldownUntilEpochMs = new AtomicLong(0L);
 
     public AsaasService(
             @Value("${asaas.api.url:https://sandbox.asaas.com/api/v3}") String baseUrl,
@@ -307,6 +310,13 @@ public class AsaasService {
             return consultarCobrancaMock(paymentId);
         }
 
+        long now = System.currentTimeMillis();
+        long cooldownUntil = rateLimitCooldownUntilEpochMs.get();
+        if (cooldownUntil > now) {
+            long remainingSec = Math.max(1, (cooldownUntil - now) / 1000);
+            throw new AsaasRateLimitException("Asaas em cooldown de rate limit por ~" + remainingSec + "s");
+        }
+
         try {
             @SuppressWarnings("unchecked")
             Map<String, Object> response = webClient.get()
@@ -317,6 +327,13 @@ public class AsaasService {
                     .block();
 
             return response;
+        } catch (WebClientResponseException.TooManyRequests e) {
+            long cooldownMs = resolveRetryAfterMs(e);
+            long until = System.currentTimeMillis() + cooldownMs;
+            rateLimitCooldownUntilEpochMs.set(until);
+            log.warn("Rate limit do Asaas (429) ao consultar cobrança {}. Pausando novas consultas por {} ms.",
+                    paymentId, cooldownMs);
+            throw new AsaasRateLimitException("Rate limit do Asaas (429)");
         } catch (org.springframework.web.reactive.function.client.WebClientResponseException.NotFound e) {
             // Cobrança não existe mais no Asaas (foi deletada ou removida)
             log.warn("Cobrança {} não encontrada no Asaas (404). Pode ter sido removida.", paymentId);
@@ -594,6 +611,20 @@ public class AsaasService {
      */
     public boolean isMockEnabled() {
         return isMockRequest();
+    }
+
+    private long resolveRetryAfterMs(WebClientResponseException.TooManyRequests e) {
+        String retryAfter = e.getHeaders() != null ? e.getHeaders().getFirst("Retry-After") : null;
+        if (retryAfter != null) {
+            try {
+                long seconds = Long.parseLong(retryAfter.trim());
+                if (seconds > 0) {
+                    return Math.min(seconds * 1000L, 5 * 60_000L);
+                }
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        return 60_000L;
     }
 }
 

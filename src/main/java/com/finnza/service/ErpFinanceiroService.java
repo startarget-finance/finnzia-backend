@@ -129,6 +129,13 @@ public class ErpFinanceiroService {
         return entityToMap(saved);
     }
 
+    public Optional<MovimentacaoFinanceira> buscarMovimentacao(Integer idEmpresa, String idMovimentacao) {
+        if (idEmpresa == null || idMovimentacao == null || idMovimentacao.isBlank()) {
+            return Optional.empty();
+        }
+        return movimentacaoRepo.findByIdMovimentacaoAndIdEmpresa(idMovimentacao, idEmpresa);
+    }
+
     /**
      * Busca movimentações no banco local no formato esperado pelo frontend.
      * orderBy: "data" | "valor" | "status" | "tipo" (campo da entidade: dataVencimento, valor, statusPagamento, debito)

@@ -2,6 +2,12 @@ package com.finnza.service;
 
 import com.finnza.domain.entity.MovimentacaoFinanceira;
 import com.finnza.domain.entity.OfxImportacao;
+import com.finnza.domain.entity.CategoriaFinanceiraEmpresa;
+import com.finnza.domain.entity.Cliente;
+import com.finnza.domain.entity.FornecedorParam;
+import com.finnza.repository.CategoriaFinanceiraEmpresaRepository;
+import com.finnza.repository.ClienteRepository;
+import com.finnza.repository.FornecedorParamRepository;
 import com.finnza.repository.MovimentacaoFinanceiraRepository;
 import com.finnza.repository.OfxImportacaoRepository;
 import com.webcohesion.ofx4j.domain.data.MessageSetType;
@@ -16,6 +22,7 @@ import com.webcohesion.ofx4j.domain.data.creditcard.CreditCardStatementResponseT
 import com.webcohesion.ofx4j.io.AggregateUnmarshaller;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -36,6 +43,9 @@ public class OfxImportService {
 
     private final MovimentacaoFinanceiraRepository movimentacaoRepo;
     private final OfxImportacaoRepository ofxImportacaoRepository;
+    private final CategoriaFinanceiraEmpresaRepository categoriaFinanceiraEmpresaRepository;
+    private final FornecedorParamRepository fornecedorParamRepository;
+    private final ClienteRepository clienteRepository;
 
     public record ImportResumo(
             int totalTransacoes,
@@ -55,6 +65,12 @@ public class OfxImportService {
             int conciliadasTotal,
             int pendentesTotal,
             int totalMovimentacoes
+    ) {}
+
+    public record BackfillResumo(
+            int processadas,
+            int categoriaPreenchida,
+            int parceiroPreenchido
     ) {}
 
     @Transactional
@@ -271,6 +287,30 @@ public class OfxImportService {
         );
     }
 
+    @Transactional
+    public BackfillResumo backfillDadosOfx(Integer idEmpresa, int limite) {
+        int limiteSeguro = Math.max(1, Math.min(limite, 5000));
+        List<MovimentacaoFinanceira> pendentes = movimentacaoRepo.findOfxComDadosPendentes(
+                idEmpresa,
+                PageRequest.of(0, limiteSeguro)
+        );
+        if (pendentes.isEmpty()) {
+            return new BackfillResumo(0, 0, 0);
+        }
+
+        int categoriaPreenchida = 0;
+        int parceiroPreenchido = 0;
+        for (MovimentacaoFinanceira mov : pendentes) {
+            boolean tinhaCategoria = hasText(mov.getNomeCategoriaFinanceira());
+            boolean tinhaParceiro = hasText(mov.getNomeClienteFornecedor());
+            enriquecerDadosOfx(mov, idEmpresa);
+            if (!tinhaCategoria && hasText(mov.getNomeCategoriaFinanceira())) categoriaPreenchida++;
+            if (!tinhaParceiro && hasText(mov.getNomeClienteFornecedor())) parceiroPreenchido++;
+        }
+        movimentacaoRepo.saveAll(pendentes);
+        return new BackfillResumo(pendentes.size(), categoriaPreenchida, parceiroPreenchido);
+    }
+
     private ResponseEnvelope parseEnvelope(InputStream ofxStream) {
         try {
             AggregateUnmarshaller<ResponseEnvelope> unmarshaller = new AggregateUnmarshaller<>(ResponseEnvelope.class);
@@ -320,6 +360,10 @@ public class OfxImportService {
                 observacaoConta = "Identificador da conta no arquivo OFX: " + rawAcct;
             }
 
+            String parceiroExtraido = extrairNomeParceiro(memo, payeeNome);
+            CategoriaFinanceiraEmpresa categoriaOfx = obterOuCriarCategoriaOfx(idEmpresa, debito);
+            ParceiroMatch parceiroMatch = resolverParceiroPorNome(idEmpresa, parceiroExtraido);
+
             MovimentacaoFinanceira m = MovimentacaoFinanceira.builder()
                     .idMovimentacao(idMov)
                     .idEmpresa(idEmpresa)
@@ -338,16 +382,16 @@ public class OfxImportService {
                     .observacao(observacaoConta)
                     .numeroParcela(1)
                     .quantidadeParcela(1)
-                    .idCategoriaFinanceira(null)
-                    .nomeCategoriaFinanceira(null)
+                    .idCategoriaFinanceira(categoriaOfx != null ? Math.toIntExact(categoriaOfx.getId()) : null)
+                    .nomeCategoriaFinanceira(categoriaOfx != null ? categoriaOfx.getNomeCategoria() : null)
                     .idContaFinanceira(idContaFinanceiraVinculo != null && idContaFinanceiraVinculo > 0
                             ? idContaFinanceiraVinculo
                             : null)
                     .nomeContaFinanceira(nomeContaFin)
                     .nomeEmpresa(null)
-                    .idCliente(null)
-                    .idFornecedor(null)
-                    .nomeClienteFornecedor(null)
+                    .idCliente(parceiroMatch.idCliente())
+                    .idFornecedor(parceiroMatch.idFornecedor())
+                    .nomeClienteFornecedor(parceiroMatch.nome())
                     .statusPagamento("pendente")
                     .dadosRaw(null)
                     .sincronizadoEm(null)
@@ -359,6 +403,94 @@ public class OfxImportService {
         }
         return out;
     }
+
+    private void enriquecerDadosOfx(MovimentacaoFinanceira mov, Integer idEmpresa) {
+        CategoriaFinanceiraEmpresa categoria = obterOuCriarCategoriaOfx(idEmpresa, Boolean.TRUE.equals(mov.getDebito()));
+        if (!hasText(mov.getNomeCategoriaFinanceira()) && categoria != null) {
+            mov.setNomeCategoriaFinanceira(categoria.getNomeCategoria());
+        }
+        if (mov.getIdCategoriaFinanceira() == null && categoria != null) {
+            mov.setIdCategoriaFinanceira(Math.toIntExact(categoria.getId()));
+        }
+
+        String nomeBase = firstNonBlank(mov.getNomeClienteFornecedor(), extrairNomeParceiro(mov.getNome(), null));
+        if (hasText(nomeBase)) {
+            ParceiroMatch parceiro = resolverParceiroPorNome(idEmpresa, nomeBase);
+            if (!hasText(mov.getNomeClienteFornecedor()) && hasText(parceiro.nome())) {
+                mov.setNomeClienteFornecedor(parceiro.nome());
+            }
+            if (mov.getIdFornecedor() == null && parceiro.idFornecedor() != null) {
+                mov.setIdFornecedor(parceiro.idFornecedor());
+                mov.setIdCliente(null);
+            } else if (mov.getIdCliente() == null && parceiro.idCliente() != null) {
+                mov.setIdCliente(parceiro.idCliente());
+                mov.setIdFornecedor(null);
+            }
+        }
+    }
+
+    private CategoriaFinanceiraEmpresa obterOuCriarCategoriaOfx(Integer idEmpresa, boolean debito) {
+        CategoriaFinanceiraEmpresa.TipoCategoria tipo = debito
+                ? CategoriaFinanceiraEmpresa.TipoCategoria.DESPESA
+                : CategoriaFinanceiraEmpresa.TipoCategoria.RECEITA;
+        String nome = debito ? "OFX - Despesa importada" : "OFX - Receita importada";
+        return categoriaFinanceiraEmpresaRepository
+                .findFirstByDeletedFalseAndIdEmpresaAndTipoAndNomeCategoriaIgnoreCaseAndNomeSubcategoriaIsNull(idEmpresa, tipo, nome)
+                .orElseGet(() -> categoriaFinanceiraEmpresaRepository.save(CategoriaFinanceiraEmpresa.builder()
+                        .idEmpresa(idEmpresa)
+                        .tipo(tipo)
+                        .nomeCategoria(nome)
+                        .nomeSubcategoria(null)
+                        .build()));
+    }
+
+    private ParceiroMatch resolverParceiroPorNome(Integer idEmpresa, String nomeInformado) {
+        String nome = sanitizeNomeParceiro(nomeInformado);
+        if (!hasText(nome)) return new ParceiroMatch(null, null, null);
+
+        List<FornecedorParam> fornecedores = fornecedorParamRepository.findByNomeNaEmpresa(idEmpresa, nome);
+        if (!fornecedores.isEmpty()) {
+            FornecedorParam f = fornecedores.get(0);
+            return new ParceiroMatch(null, f.getId() != null ? Math.toIntExact(f.getId()) : null, firstNonBlank(f.getRazaoSocial(), f.getNomeFantasia(), nome));
+        }
+
+        List<Cliente> clientes = clienteRepository.findByNomeNaEmpresa(idEmpresa, nome);
+        if (!clientes.isEmpty()) {
+            Cliente c = clientes.get(0);
+            return new ParceiroMatch(c.getId() != null ? Math.toIntExact(c.getId()) : null, null, firstNonBlank(c.getRazaoSocial(), c.getNomeFantasia(), nome));
+        }
+        return new ParceiroMatch(null, null, nome);
+    }
+
+    private String extrairNomeParceiro(String memo, String payeeNome) {
+        String bruto = firstNonBlank(payeeNome, memo);
+        if (!hasText(bruto)) return null;
+        String candidato = bruto;
+
+        int posTraço = candidato.indexOf(" - ");
+        if (posTraço > 0) {
+            candidato = candidato.substring(0, posTraço);
+        }
+        int posBarra = candidato.indexOf('/');
+        if (posBarra > 0) {
+            candidato = candidato.substring(0, posBarra);
+        }
+        return sanitizeNomeParceiro(candidato);
+    }
+
+    private String sanitizeNomeParceiro(String valor) {
+        if (!hasText(valor)) return null;
+        String s = valor.trim().replaceAll("\\s+", " ");
+        s = s.replaceAll("(?i)^(pix|ted|doc|debito|credito)\\s+", "");
+        s = s.replaceAll("(?i)\\b(pgto|pagamento|transferencia|transferência|compra)\\b", "").trim();
+        return hasText(s) ? s : null;
+    }
+
+    private static boolean hasText(String v) {
+        return v != null && !v.isBlank();
+    }
+
+    private record ParceiroMatch(Integer idCliente, Integer idFornecedor, String nome) {}
 
     private static LocalDate toLocalDate(Date d) {
         if (d == null) return null;

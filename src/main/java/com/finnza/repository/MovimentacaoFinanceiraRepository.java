@@ -194,4 +194,20 @@ public interface MovimentacaoFinanceiraRepository extends JpaRepository<Moviment
 
     @Modifying
     int deleteByIdEmpresaAndOfxImportacaoId(Integer idEmpresa, Long ofxImportacaoId);
+
+    @Query("""
+            SELECT m
+            FROM MovimentacaoFinanceira m
+            WHERE m.idEmpresa = :idEmpresa
+              AND m.ofxImportacaoId IS NOT NULL
+              AND (
+                   m.nomeClienteFornecedor IS NULL OR m.nomeClienteFornecedor = ''
+                OR m.nomeCategoriaFinanceira IS NULL OR m.nomeCategoriaFinanceira = ''
+              )
+            ORDER BY m.dataVencimento DESC, m.idMovimentacao DESC
+            """)
+    List<MovimentacaoFinanceira> findOfxComDadosPendentes(
+            @Param("idEmpresa") Integer idEmpresa,
+            Pageable pageable
+    );
 }

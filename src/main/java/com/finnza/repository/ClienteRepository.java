@@ -9,6 +9,7 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
+import java.util.List;
 import java.util.Optional;
 
 /**
@@ -49,5 +50,19 @@ public interface ClienteRepository extends JpaRepository<Cliente, Long>, JpaSpec
 
     @Query("SELECT c FROM Cliente c WHERE c.cpfCnpj = :cpf AND c.deleted = false AND c.cpfCnpj IS NOT NULL AND (:id IS NULL OR c.id <> :id)")
     Optional<Cliente> findOutroPorCpfCnpj(@Param("cpf") String cpf, @Param("id") Long id);
+
+    @Query("""
+            SELECT c
+            FROM Cliente c
+            JOIN c.idEmpresas e
+            WHERE c.deleted = false
+              AND e = :idEmpresa
+              AND (
+                    LOWER(c.razaoSocial) = LOWER(:nome)
+                 OR LOWER(c.nomeFantasia) = LOWER(:nome)
+              )
+            ORDER BY c.id ASC
+            """)
+    List<Cliente> findByNomeNaEmpresa(@Param("idEmpresa") Integer idEmpresa, @Param("nome") String nome);
 }
 

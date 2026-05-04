@@ -766,5 +766,34 @@ public class ErpFinanceiroController {
             ));
         }
     }
+
+    @PostMapping("/conciliacoes-ofx/backfill")
+    @PreAuthorize("hasPermission(null, 'MOVIMENTACOES')")
+    public ResponseEntity<?> backfillConciliacaoOfx(
+            @RequestHeader(value = "X-Empresa-Id", required = false) String headerEmpresaId,
+            @RequestParam(value = "limite", required = false, defaultValue = "1000") Integer limite
+    ) {
+        Integer idEmpresa = resolverEmpresaId(headerEmpresaId);
+        if (idEmpresa == null) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "erro", true,
+                    "mensagem", "Não foi possível identificar a empresa para esta requisição"
+            ));
+        }
+        if (!validarAcessoEmpresa(idEmpresa)) {
+            return ResponseEntity.status(403).body(Map.of(
+                    "erro", true,
+                    "mensagem", "Você não tem permissão de acessar esta empresa"
+            ));
+        }
+        int lim = (limite == null || limite <= 0) ? 1000 : limite;
+        var resumo = ofxImportService.backfillDadosOfx(idEmpresa, lim);
+        return ResponseEntity.ok(Map.of(
+                "erro", false,
+                "processadas", resumo.processadas(),
+                "categoriaPreenchida", resumo.categoriaPreenchida(),
+                "parceiroPreenchido", resumo.parceiroPreenchido()
+        ));
+    }
 }
 

@@ -25,82 +25,236 @@ public class CategoriaFinanceiraService {
     public List<CategoriaFinanceiraDTO> listar(String emailUsuario, Integer idEmpresa) {
         validarAcesso(emailUsuario, idEmpresa);
         List<CategoriaFinanceiraEmpresa> rows =
-                repository.findAllByDeletedFalseAndIdEmpresaOrderByTipoAscNomeCategoriaAscNomeSubcategoriaAsc(idEmpresa);
-        return agrupar(rows);
+                repository.findAllByDeletedFalseAndIdEmpresaOrderByTipoAscParentIdAscOrdemAscNomeAsc(idEmpresa);
+        return montarFloresta(rows);
     }
 
     public List<CategoriaFinanceiraDTO> salvar(String emailUsuario, CategoriaFinanceiraRequest req) {
         Integer idEmpresa = Optional.ofNullable(req.getIdEmpresa()).orElse(0);
         validarAcesso(emailUsuario, idEmpresa);
         CategoriaFinanceiraEmpresa.TipoCategoria tipo = parseTipo(req.getTipo());
-        String nomeCategoria = normalizar(req.getNomeCategoria());
-        if (nomeCategoria.isEmpty()) {
-            throw new IllegalArgumentException("Nome da categoria é obrigatório.");
-        }
-        String nomeSubcategoria = normalizar(req.getNomeSubcategoria());
 
-        if (nomeSubcategoria.isEmpty()) {
+        String nome = normalizar(req.getNome());
+        Long parentId = req.getParentId();
+
+        if (nome.isEmpty()) {
+            String legCat = normalizar(req.getNomeCategoria());
+            String legSub = normalizar(req.getNomeSubcategoria());
+            if (legCat.isEmpty()) {
+                throw new IllegalArgumentException("Nome do plano de contas é obrigatório.");
+            }
+            if (legSub.isEmpty()) {
+                nome = legCat;
+                parentId = null;
+            } else {
+                nome = legSub;
+                CategoriaFinanceiraEmpresa pai = repository
+                        .findRootByNome(idEmpresa, tipo, legCat)
+                        .orElseGet(() -> repository.save(CategoriaFinanceiraEmpresa.builder()
+                                .idEmpresa(idEmpresa)
+                                .tipo(tipo)
+                                .nome(legCat)
+                                .parentId(null)
+                                .ordem(proximaOrdem(idEmpresa, tipo, null))
+                                .build()));
+                parentId = pai.getId();
+            }
+        }
+
+        if (nome.isEmpty()) {
+            throw new IllegalArgumentException("Nome do plano de contas é obrigatório.");
+        }
+
+        CategoriaFinanceiraEmpresa parent = null;
+        if (parentId != null && parentId > 0) {
+            parent = repository.findByIdAndDeletedFalse(parentId)
+                    .orElseThrow(() -> new IllegalArgumentException("Categoria pai não encontrada."));
+            if (!Objects.equals(parent.getIdEmpresa(), idEmpresa)) {
+                throw new IllegalArgumentException("Categoria pai não pertence à empresa.");
+            }
+            if (parent.getTipo() != tipo) {
+                throw new IllegalArgumentException("Tipo deve ser o mesmo da categoria pai.");
+            }
+        }
+
+        if (parentId == null || parentId <= 0) {
             boolean existe = repository
-                    .findFirstByDeletedFalseAndIdEmpresaAndTipoAndNomeCategoriaIgnoreCaseAndNomeSubcategoriaIsNull(
-                            idEmpresa, tipo, nomeCategoria
-                    )
+                    .findFirstByDeletedFalseAndIdEmpresaAndTipoAndParentIdIsNullAndNomeIgnoreCase(idEmpresa, tipo, nome)
                     .isPresent();
             if (!existe) {
                 repository.save(CategoriaFinanceiraEmpresa.builder()
                         .idEmpresa(idEmpresa)
                         .tipo(tipo)
-                        .nomeCategoria(nomeCategoria)
-                        .nomeSubcategoria(null)
+                        .nome(nome)
+                        .parentId(null)
+                        .ordem(proximaOrdem(idEmpresa, tipo, null))
                         .build());
             }
         } else {
+            Long pid = parent.getId();
             boolean existe = repository
-                    .findFirstByDeletedFalseAndIdEmpresaAndTipoAndNomeCategoriaIgnoreCaseAndNomeSubcategoriaIgnoreCase(
-                            idEmpresa, tipo, nomeCategoria, nomeSubcategoria
-                    )
+                    .findFirstByDeletedFalseAndIdEmpresaAndTipoAndParentIdAndNomeIgnoreCase(idEmpresa, tipo, pid, nome)
                     .isPresent();
             if (!existe) {
                 repository.save(CategoriaFinanceiraEmpresa.builder()
                         .idEmpresa(idEmpresa)
                         .tipo(tipo)
-                        .nomeCategoria(nomeCategoria)
-                        .nomeSubcategoria(nomeSubcategoria)
+                        .nome(nome)
+                        .parentId(pid)
+                        .ordem(proximaOrdem(idEmpresa, tipo, pid))
                         .build());
             }
         }
         return listar(emailUsuario, idEmpresa);
     }
 
-    public List<CategoriaFinanceiraDTO> excluirCategoria(String emailUsuario, Integer idEmpresa, String idCategoria) {
+    /**
+     * Renomeia um nó existente (mesmo nível hierárquico e pai). Evita duplicidade de nome entre irmãos.
+     */
+    public List<CategoriaFinanceiraDTO> renomearNo(
+            String emailUsuario, Integer idEmpresa, Long nodeId, String nomeNovo) {
         validarAcesso(emailUsuario, idEmpresa);
-        CategoriaKey key = parseCategoriaKey(idCategoria);
-        List<CategoriaFinanceiraEmpresa> rows =
-                repository.findAllByDeletedFalseAndIdEmpresaOrderByTipoAscNomeCategoriaAscNomeSubcategoriaAsc(idEmpresa);
-        rows.stream()
-                .filter(r -> r.getTipo() == key.tipo && r.getNomeCategoria().equalsIgnoreCase(key.nomeCategoria))
-                .forEach(CategoriaFinanceiraEmpresa::marcarExcluido);
-        repository.saveAll(rows);
+        String nome = normalizar(nomeNovo);
+        if (nome.isEmpty()) {
+            throw new IllegalArgumentException("Nome do plano de contas é obrigatório.");
+        }
+        CategoriaFinanceiraEmpresa node = repository.findByIdAndDeletedFalse(nodeId)
+                .orElseThrow(() -> new IllegalArgumentException("Item do plano de contas não encontrado."));
+        if (!Objects.equals(node.getIdEmpresa(), idEmpresa)) {
+            throw new IllegalArgumentException("Item não pertence à empresa selecionada.");
+        }
+        if (nome.equalsIgnoreCase(node.getNome())) {
+            return listar(emailUsuario, idEmpresa);
+        }
+        CategoriaFinanceiraEmpresa.TipoCategoria tipo = node.getTipo();
+        Long parentId = node.getParentId();
+        if (parentId == null || parentId <= 0) {
+            Optional<CategoriaFinanceiraEmpresa> clash = repository
+                    .findFirstByDeletedFalseAndIdEmpresaAndTipoAndParentIdIsNullAndNomeIgnoreCase(idEmpresa, tipo, nome);
+            if (clash.isPresent() && !clash.get().getId().equals(nodeId)) {
+                throw new IllegalArgumentException("Já existe categoria com este nome.");
+            }
+        } else {
+            Optional<CategoriaFinanceiraEmpresa> clash = repository
+                    .findFirstByDeletedFalseAndIdEmpresaAndTipoAndParentIdAndNomeIgnoreCase(
+                            idEmpresa, tipo, parentId, nome);
+            if (clash.isPresent() && !clash.get().getId().equals(nodeId)) {
+                throw new IllegalArgumentException("Já existe conta com este nome neste agrupamento.");
+            }
+        }
+        node.setNome(nome);
+        repository.save(node);
         return listar(emailUsuario, idEmpresa);
     }
 
-    public List<CategoriaFinanceiraDTO> excluirSubcategoria(
-            String emailUsuario,
-            Integer idEmpresa,
-            String idCategoria,
-            Long idSubcategoria
-    ) {
+    /**
+     * Remove o nó e toda a subárvore (soft delete).
+     */
+    public List<CategoriaFinanceiraDTO> excluirNo(String emailUsuario, Integer idEmpresa, Long nodeId) {
         validarAcesso(emailUsuario, idEmpresa);
-        CategoriaKey key = parseCategoriaKey(idCategoria);
-        CategoriaFinanceiraEmpresa row = repository.findByIdAndDeletedFalse(idSubcategoria)
-                .orElseThrow(() -> new IllegalArgumentException("Subcategoria não encontrada."));
-        if (!Objects.equals(row.getIdEmpresa(), idEmpresa)
-                || row.getTipo() != key.tipo
-                || !row.getNomeCategoria().equalsIgnoreCase(key.nomeCategoria)) {
-            throw new IllegalArgumentException("Subcategoria não pertence à categoria informada.");
+        CategoriaFinanceiraEmpresa node = repository.findByIdAndDeletedFalse(nodeId)
+                .orElseThrow(() -> new IllegalArgumentException("Item do plano de contas não encontrado."));
+        if (!Objects.equals(node.getIdEmpresa(), idEmpresa)) {
+            throw new IllegalArgumentException("Item não pertence à empresa selecionada.");
         }
-        row.marcarExcluido();
-        repository.save(row);
+        Set<Long> ids = coletarSubarvoreIds(node.getId(), idEmpresa);
+        List<CategoriaFinanceiraEmpresa> todos = repository
+                .findAllByDeletedFalseAndIdEmpresaOrderByTipoAscParentIdAscOrdemAscNomeAsc(idEmpresa);
+        List<CategoriaFinanceiraEmpresa> toSave = new ArrayList<>();
+        for (CategoriaFinanceiraEmpresa e : todos) {
+            if (ids.contains(e.getId())) {
+                e.marcarExcluido();
+                toSave.add(e);
+            }
+        }
+        repository.saveAll(toSave);
         return listar(emailUsuario, idEmpresa);
+    }
+
+    private Set<Long> coletarSubarvoreIds(Long rootId, Integer idEmpresa) {
+        List<CategoriaFinanceiraEmpresa> all =
+                repository.findAllByDeletedFalseAndIdEmpresaOrderByTipoAscParentIdAscOrdemAscNomeAsc(idEmpresa);
+        Map<Long, List<CategoriaFinanceiraEmpresa>> byParent = new HashMap<>();
+        for (CategoriaFinanceiraEmpresa e : all) {
+            Long p = e.getParentId();
+            byParent.computeIfAbsent(p == null ? -1L : p, k -> new ArrayList<>()).add(e);
+        }
+        Set<Long> out = new LinkedHashSet<>();
+        Deque<Long> dq = new ArrayDeque<>();
+        dq.add(rootId);
+        while (!dq.isEmpty()) {
+            Long id = dq.poll();
+            if (!out.add(id)) {
+                continue;
+            }
+            List<CategoriaFinanceiraEmpresa> kids = byParent.getOrDefault(id, List.of());
+            for (CategoriaFinanceiraEmpresa k : kids) {
+                dq.add(k.getId());
+            }
+        }
+        return out;
+    }
+
+    private int proximaOrdem(Integer idEmpresa, CategoriaFinanceiraEmpresa.TipoCategoria tipo, Long parentId) {
+        Integer max = (parentId == null || parentId <= 0)
+                ? repository.findMaxOrdemRaiz(idEmpresa, tipo)
+                : repository.findMaxOrdemFilho(idEmpresa, tipo, parentId);
+        return (max == null ? -1 : max) + 1;
+    }
+
+    private List<CategoriaFinanceiraDTO> montarFloresta(List<CategoriaFinanceiraEmpresa> rows) {
+        Map<Long, List<CategoriaFinanceiraEmpresa>> byParent = new LinkedHashMap<>();
+        for (CategoriaFinanceiraEmpresa r : rows) {
+            Long p = r.getParentId();
+            byParent.computeIfAbsent(p == null ? -1L : p, k -> new ArrayList<>()).add(r);
+        }
+        for (List<CategoriaFinanceiraEmpresa> list : byParent.values()) {
+            list.sort(Comparator
+                    .comparing(CategoriaFinanceiraEmpresa::getOrdem, Comparator.nullsLast(Integer::compareTo))
+                    .thenComparing(CategoriaFinanceiraEmpresa::getNome, String.CASE_INSENSITIVE_ORDER));
+        }
+        List<CategoriaFinanceiraEmpresa> roots = byParent.getOrDefault(-1L, List.of());
+        roots.sort(Comparator
+                .comparing(CategoriaFinanceiraEmpresa::getTipo)
+                .thenComparing(CategoriaFinanceiraEmpresa::getOrdem, Comparator.nullsLast(Integer::compareTo))
+                .thenComparing(CategoriaFinanceiraEmpresa::getNome, String.CASE_INSENSITIVE_ORDER));
+        return roots.stream().map(r -> toRootDto(r, byParent)).collect(Collectors.toList());
+    }
+
+    private CategoriaFinanceiraDTO toRootDto(
+            CategoriaFinanceiraEmpresa root,
+            Map<Long, List<CategoriaFinanceiraEmpresa>> byParent
+    ) {
+        String tipoStr = root.getTipo() == CategoriaFinanceiraEmpresa.TipoCategoria.RECEITA ? "receita" : "despesa";
+        String id = tipoStr + ":" + root.getId();
+        List<SubcategoriaFinanceiraDTO> filhos = nosFilhosParaDto(root.getId(), byParent);
+        return CategoriaFinanceiraDTO.builder()
+                .id(id)
+                .tipo(tipoStr)
+                .nome(root.getNome())
+                .subcategorias(filhos)
+                .dataCriacao(root.getDataCriacao())
+                .dataAtualizacao(root.getDataAtualizacao())
+                .build();
+    }
+
+    private List<SubcategoriaFinanceiraDTO> nosFilhosParaDto(
+            Long parentDbId,
+            Map<Long, List<CategoriaFinanceiraEmpresa>> byParent
+    ) {
+        List<CategoriaFinanceiraEmpresa> kids = byParent.getOrDefault(parentDbId, List.of());
+        return kids.stream().map(k -> toSubDto(k, byParent)).collect(Collectors.toList());
+    }
+
+    private SubcategoriaFinanceiraDTO toSubDto(
+            CategoriaFinanceiraEmpresa node,
+            Map<Long, List<CategoriaFinanceiraEmpresa>> byParent
+    ) {
+        return SubcategoriaFinanceiraDTO.builder()
+                .id(node.getId())
+                .nome(node.getNome())
+                .children(nosFilhosParaDto(node.getId(), byParent))
+                .build();
     }
 
     private void validarAcesso(String emailUsuario, Integer idEmpresa) {
@@ -121,58 +275,5 @@ public class CategoriaFinanceiraService {
 
     private static String normalizar(String s) {
         return s == null ? "" : s.trim();
-    }
-
-    private static List<CategoriaFinanceiraDTO> agrupar(List<CategoriaFinanceiraEmpresa> rows) {
-        Map<String, CategoriaFinanceiraDTO> map = new LinkedHashMap<>();
-        for (CategoriaFinanceiraEmpresa r : rows) {
-            String key = buildCategoriaId(r.getTipo(), r.getNomeCategoria());
-            CategoriaFinanceiraDTO dto = map.computeIfAbsent(key, k -> CategoriaFinanceiraDTO.builder()
-                    .id(k)
-                    .tipo(r.getTipo() == CategoriaFinanceiraEmpresa.TipoCategoria.RECEITA ? "receita" : "despesa")
-                    .nome(r.getNomeCategoria())
-                    .subcategorias(new ArrayList<>())
-                    .dataCriacao(r.getDataCriacao())
-                    .dataAtualizacao(r.getDataAtualizacao())
-                    .build());
-            if (r.getDataCriacao() != null && (dto.getDataCriacao() == null || r.getDataCriacao().isBefore(dto.getDataCriacao()))) {
-                dto.setDataCriacao(r.getDataCriacao());
-            }
-            if (r.getDataAtualizacao() != null && (dto.getDataAtualizacao() == null || r.getDataAtualizacao().isAfter(dto.getDataAtualizacao()))) {
-                dto.setDataAtualizacao(r.getDataAtualizacao());
-            }
-            if (r.getNomeSubcategoria() != null && !r.getNomeSubcategoria().isBlank()) {
-                dto.getSubcategorias().add(SubcategoriaFinanceiraDTO.builder()
-                        .id(r.getId())
-                        .nome(r.getNomeSubcategoria())
-                        .build());
-            }
-        }
-        return map.values().stream()
-                .peek(c -> c.setSubcategorias(c.getSubcategorias().stream()
-                        .sorted(Comparator.comparing(SubcategoriaFinanceiraDTO::getNome, String.CASE_INSENSITIVE_ORDER))
-                        .collect(Collectors.toList())))
-                .sorted(Comparator
-                        .comparing(CategoriaFinanceiraDTO::getTipo)
-                        .thenComparing(CategoriaFinanceiraDTO::getNome, String.CASE_INSENSITIVE_ORDER))
-                .collect(Collectors.toList());
-    }
-
-    private record CategoriaKey(CategoriaFinanceiraEmpresa.TipoCategoria tipo, String nomeCategoria) {}
-
-    private static CategoriaKey parseCategoriaKey(String idCategoria) {
-        String raw = normalizar(idCategoria);
-        int idx = raw.indexOf(':');
-        if (idx <= 0 || idx >= raw.length() - 1) {
-            throw new IllegalArgumentException("Identificador de categoria inválido.");
-        }
-        String tipo = raw.substring(0, idx);
-        String nome = raw.substring(idx + 1);
-        return new CategoriaKey(parseTipo(tipo), nome);
-    }
-
-    private static String buildCategoriaId(CategoriaFinanceiraEmpresa.TipoCategoria tipo, String nomeCategoria) {
-        String t = tipo == CategoriaFinanceiraEmpresa.TipoCategoria.RECEITA ? "receita" : "despesa";
-        return t + ":" + nomeCategoria;
     }
 }

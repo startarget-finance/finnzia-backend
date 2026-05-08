@@ -1,6 +1,7 @@
 package com.finnza.controller;
 
 import com.finnza.dto.request.CategoriaFinanceiraRequest;
+import com.finnza.dto.request.RenomearCategoriaFinanceiraRequest;
 import com.finnza.dto.response.CategoriaFinanceiraDTO;
 import com.finnza.service.CategoriaFinanceiraService;
 import jakarta.validation.Valid;
@@ -43,28 +44,30 @@ public class CategoriaFinanceiraController {
         }
     }
 
-    @DeleteMapping("/{idCategoria}")
+    @PatchMapping("/nos/{id}")
     @PreAuthorize("hasPermission(null, 'MOVIMENTACOES')")
-    public ResponseEntity<?> excluirCategoria(
-            @PathVariable String idCategoria,
-            @RequestParam("idEmpresa") Integer idEmpresa
-    ) {
+    public ResponseEntity<?> renomearNo(
+            @PathVariable Long id,
+            @RequestParam("idEmpresa") Integer idEmpresa,
+            @Valid @RequestBody RenomearCategoriaFinanceiraRequest body) {
         try {
-            return ResponseEntity.ok(service.excluirCategoria(emailAutenticado(), idEmpresa, idCategoria));
+            return ResponseEntity.ok(service.renomearNo(emailAutenticado(), idEmpresa, id, body.getNome()));
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(Map.of("mensagem", e.getMessage()));
         }
     }
 
-    @DeleteMapping("/{idCategoria}/subcategorias/{idSubcategoria}")
+    /**
+     * Exclui um nó (raiz ou filho) e toda a subárvore.
+     */
+    @DeleteMapping("/nos/{id}")
     @PreAuthorize("hasPermission(null, 'MOVIMENTACOES')")
-    public ResponseEntity<?> excluirSubcategoria(
-            @PathVariable String idCategoria,
-            @PathVariable Long idSubcategoria,
+    public ResponseEntity<?> excluirNo(
+            @PathVariable Long id,
             @RequestParam("idEmpresa") Integer idEmpresa
     ) {
         try {
-            return ResponseEntity.ok(service.excluirSubcategoria(emailAutenticado(), idEmpresa, idCategoria, idSubcategoria));
+            return ResponseEntity.ok(service.excluirNo(emailAutenticado(), idEmpresa, id));
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(Map.of("mensagem", e.getMessage()));
         }

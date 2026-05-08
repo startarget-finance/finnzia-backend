@@ -33,6 +33,7 @@ import java.security.MessageDigest;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
+import java.text.Normalizer;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -40,6 +41,10 @@ import java.util.stream.Collectors;
 @Service
 @RequiredArgsConstructor
 public class OfxImportService {
+    private static final String OFX_RECEITA_PADRAO = "Entradas bancárias";
+    private static final String OFX_DESPESA_PADRAO = "Saídas bancárias";
+    private static final String OFX_RECEITA_LEGADO = "OFX - Receita importada";
+    private static final String OFX_DESPESA_LEGADO = "OFX - Despesa importada";
 
     private final MovimentacaoFinanceiraRepository movimentacaoRepo;
     private final OfxImportacaoRepository ofxImportacaoRepository;
@@ -333,6 +338,8 @@ public class OfxImportService {
     ) {
         if (txs == null) return List.of();
         List<MovimentacaoFinanceira> out = new ArrayList<>();
+        CategoriaClassifier receitaClassifier = new CategoriaClassifier(idEmpresa, false);
+        CategoriaClassifier despesaClassifier = new CategoriaClassifier(idEmpresa, true);
         int idx = 0;
         for (Object obj : txs) {
             if (!(obj instanceof Transaction t)) {
@@ -361,8 +368,15 @@ public class OfxImportService {
             }
 
             String parceiroExtraido = extrairNomeParceiro(memo, payeeNome);
-            CategoriaFinanceiraEmpresa categoriaOfx = obterOuCriarCategoriaOfx(idEmpresa, debito);
             ParceiroMatch parceiroMatch = resolverParceiroPorNome(idEmpresa, parceiroExtraido);
+            CategoriaClassifier classifier = debito ? despesaClassifier : receitaClassifier;
+            CategoriaMatch categoriaMatch = classifier.classificar(memo, payeeNome, parceiroMatch.nome());
+            CategoriaFinanceiraEmpresa categoriaOfx = categoriaMatch.categoria();
+            String observacaoClassificacao = montarObservacaoClassificacao(categoriaMatch);
+            String observacaoFinal = firstNonBlank(observacaoConta, observacaoClassificacao);
+            if (hasText(observacaoConta) && hasText(observacaoClassificacao)) {
+                observacaoFinal = observacaoConta + " | " + observacaoClassificacao;
+            }
 
             MovimentacaoFinanceira m = MovimentacaoFinanceira.builder()
                     .idMovimentacao(idMov)
@@ -379,11 +393,11 @@ public class OfxImportService {
                     .tipoMovimentacao(null)
                     .nomeTipoMovimentacao(null)
                     .nome(memo != null ? memo : "Movimentação OFX")
-                    .observacao(observacaoConta)
+                    .observacao(observacaoFinal)
                     .numeroParcela(1)
                     .quantidadeParcela(1)
                     .idCategoriaFinanceira(categoriaOfx != null ? Math.toIntExact(categoriaOfx.getId()) : null)
-                    .nomeCategoriaFinanceira(categoriaOfx != null ? categoriaOfx.getNomeCategoria() : null)
+                    .nomeCategoriaFinanceira(categoriaOfx != null ? categoriaOfx.getNome() : null)
                     .idContaFinanceira(idContaFinanceiraVinculo != null && idContaFinanceiraVinculo > 0
                             ? idContaFinanceiraVinculo
                             : null)
@@ -404,10 +418,17 @@ public class OfxImportService {
         return out;
     }
 
+    private String montarObservacaoClassificacao(CategoriaMatch categoriaMatch) {
+        if (categoriaMatch == null || !hasText(categoriaMatch.origem())) {
+            return null;
+        }
+        return "Classificação automática: " + categoriaMatch.origem();
+    }
+
     private void enriquecerDadosOfx(MovimentacaoFinanceira mov, Integer idEmpresa) {
         CategoriaFinanceiraEmpresa categoria = obterOuCriarCategoriaOfx(idEmpresa, Boolean.TRUE.equals(mov.getDebito()));
-        if (!hasText(mov.getNomeCategoriaFinanceira()) && categoria != null) {
-            mov.setNomeCategoriaFinanceira(categoria.getNomeCategoria());
+        if ((!hasText(mov.getNomeCategoriaFinanceira()) || isCategoriaOfxLegada(mov.getNomeCategoriaFinanceira())) && categoria != null) {
+            mov.setNomeCategoriaFinanceira(categoria.getNome());
         }
         if (mov.getIdCategoriaFinanceira() == null && categoria != null) {
             mov.setIdCategoriaFinanceira(Math.toIntExact(categoria.getId()));
@@ -433,15 +454,32 @@ public class OfxImportService {
         CategoriaFinanceiraEmpresa.TipoCategoria tipo = debito
                 ? CategoriaFinanceiraEmpresa.TipoCategoria.DESPESA
                 : CategoriaFinanceiraEmpresa.TipoCategoria.RECEITA;
-        String nome = debito ? "OFX - Despesa importada" : "OFX - Receita importada";
+        String nomePadrao = debito ? OFX_DESPESA_PADRAO : OFX_RECEITA_PADRAO;
+        String nomeLegado = debito ? OFX_DESPESA_LEGADO : OFX_RECEITA_LEGADO;
+
         return categoriaFinanceiraEmpresaRepository
-                .findFirstByDeletedFalseAndIdEmpresaAndTipoAndNomeCategoriaIgnoreCaseAndNomeSubcategoriaIsNull(idEmpresa, tipo, nome)
-                .orElseGet(() -> categoriaFinanceiraEmpresaRepository.save(CategoriaFinanceiraEmpresa.builder()
-                        .idEmpresa(idEmpresa)
-                        .tipo(tipo)
-                        .nomeCategoria(nome)
-                        .nomeSubcategoria(null)
-                        .build()));
+                .findFirstByDeletedFalseAndIdEmpresaAndTipoAndParentIdIsNullAndNomeIgnoreCase(idEmpresa, tipo, nomePadrao)
+                .orElseGet(() -> {
+                    Optional<CategoriaFinanceiraEmpresa> legado =
+                            categoriaFinanceiraEmpresaRepository
+                                    .findFirstByDeletedFalseAndIdEmpresaAndTipoAndParentIdIsNullAndNomeIgnoreCase(
+                                            idEmpresa, tipo, nomeLegado);
+                    if (legado.isPresent()) {
+                        CategoriaFinanceiraEmpresa categoria = legado.get();
+                        categoria.setNome(nomePadrao);
+                        return categoriaFinanceiraEmpresaRepository.save(categoria);
+                    }
+
+                    Integer mx = categoriaFinanceiraEmpresaRepository.findMaxOrdemRaiz(idEmpresa, tipo);
+                    int ordem = (mx == null ? -1 : mx) + 1;
+                    return categoriaFinanceiraEmpresaRepository.save(CategoriaFinanceiraEmpresa.builder()
+                            .idEmpresa(idEmpresa)
+                            .tipo(tipo)
+                            .nome(nomePadrao)
+                            .parentId(null)
+                            .ordem(ordem)
+                            .build());
+                });
     }
 
     private ParceiroMatch resolverParceiroPorNome(Integer idEmpresa, String nomeInformado) {
@@ -488,6 +526,122 @@ public class OfxImportService {
 
     private static boolean hasText(String v) {
         return v != null && !v.isBlank();
+    }
+
+    private boolean isCategoriaOfxLegada(String nomeCategoria) {
+        if (!hasText(nomeCategoria)) {
+            return false;
+        }
+        String normalized = nomeCategoria.trim();
+        return OFX_RECEITA_LEGADO.equalsIgnoreCase(normalized) || OFX_DESPESA_LEGADO.equalsIgnoreCase(normalized);
+    }
+
+    private final class CategoriaClassifier {
+        private final boolean debito;
+        private final CategoriaFinanceiraEmpresa fallbackCategoria;
+        private final List<CategoriaFinanceiraEmpresa> categorias;
+        private final Map<String, CategoriaFinanceiraEmpresa> nomeExato;
+
+        private CategoriaClassifier(Integer idEmpresa, boolean debito) {
+            this.debito = debito;
+            this.fallbackCategoria = obterOuCriarCategoriaOfx(idEmpresa, debito);
+            CategoriaFinanceiraEmpresa.TipoCategoria tipo = debito
+                    ? CategoriaFinanceiraEmpresa.TipoCategoria.DESPESA
+                    : CategoriaFinanceiraEmpresa.TipoCategoria.RECEITA;
+            this.categorias = categoriaFinanceiraEmpresaRepository
+                    .findAllByDeletedFalseAndIdEmpresaOrderByTipoAscParentIdAscOrdemAscNomeAsc(idEmpresa)
+                    .stream()
+                    .filter(c -> c.getTipo() == tipo)
+                    .collect(Collectors.toList());
+            this.nomeExato = new LinkedHashMap<>();
+            for (CategoriaFinanceiraEmpresa c : categorias) {
+                nomeExato.putIfAbsent(normalize(c.getNome()), c);
+            }
+        }
+
+        private CategoriaMatch classificar(String memo, String payee, String parceiroNome) {
+            String texto = normalize(String.join(" ", List.of(
+                    firstNonBlank(memo, ""),
+                    firstNonBlank(payee, ""),
+                    firstNonBlank(parceiroNome, "")
+            )));
+            if (!hasText(texto)) {
+                return new CategoriaMatch(fallbackCategoria, "fallback-sem-texto");
+            }
+
+            CategoriaFinanceiraEmpresa porNome = nomeExato.get(texto);
+            if (porNome != null) {
+                return new CategoriaMatch(porNome, "nome-exato");
+            }
+
+            CategoriaFinanceiraEmpresa porCategoriaContida = categorias.stream()
+                    .filter(c -> {
+                        String nome = normalize(c.getNome());
+                        return nome.length() >= 4 && texto.contains(nome);
+                    })
+                    .findFirst()
+                    .orElse(null);
+            if (porCategoriaContida != null) {
+                return new CategoriaMatch(porCategoriaContida, "categoria-contida");
+            }
+
+            LinkedHashMap<String, List<String>> regras = regrasProfissionais(this.debito);
+            for (Map.Entry<String, List<String>> regra : regras.entrySet()) {
+                boolean ok = regra.getValue().stream().anyMatch(texto::contains);
+                if (!ok) continue;
+                CategoriaFinanceiraEmpresa porRegra = buscarCategoriaPorNomeAproximado(regra.getKey());
+                if (porRegra != null) {
+                    return new CategoriaMatch(porRegra, "regra-" + regra.getKey());
+                }
+            }
+
+            return new CategoriaMatch(fallbackCategoria, "fallback-ofx");
+        }
+
+        private CategoriaFinanceiraEmpresa buscarCategoriaPorNomeAproximado(String target) {
+            String alvo = normalize(target);
+            CategoriaFinanceiraEmpresa exata = nomeExato.get(alvo);
+            if (exata != null) {
+                return exata;
+            }
+            return categorias.stream()
+                    .filter(c -> {
+                        String nome = normalize(c.getNome());
+                        return nome.contains(alvo) || alvo.contains(nome);
+                    })
+                    .findFirst()
+                    .orElse(null);
+        }
+
+        private LinkedHashMap<String, List<String>> regrasProfissionais(boolean debito) {
+            LinkedHashMap<String, List<String>> regras = new LinkedHashMap<>();
+            if (debito) {
+                regras.put("Tráfego Pago", List.of("meta ads", "facebook ads", "google ads", "trafego pago", "ads"));
+                regras.put("Impostos", List.of("darj", "simples nacional", "imposto", "darf", "tributo"));
+                regras.put("Folha / Salário", List.of("salario", "folha", "pro labore", "adiantamento salarial"));
+                regras.put("Tarifas Bancárias", List.of("tarifa", "cesta", "manutencao conta", "juros", "iof"));
+                regras.put("Fornecedores", List.of("pagamento fornecedor", "fornecedor", "nf "));
+            } else {
+                regras.put("Receita de Contratos", List.of("mensalidade", "assinatura", "recebimento cliente", "fatura recebida"));
+                regras.put("Recebimentos", List.of("pix recebido", "transferencia recebida", "credito em conta"));
+                regras.put("Vendas", List.of("venda", "receita", "pagamento cliente"));
+            }
+            return regras;
+        }
+    }
+
+    private record CategoriaMatch(CategoriaFinanceiraEmpresa categoria, String origem) {}
+
+    private String normalize(String valor) {
+        if (!hasText(valor)) {
+            return "";
+        }
+        String noAccents = Normalizer.normalize(valor, Normalizer.Form.NFD)
+                .replaceAll("\\p{M}", "");
+        return noAccents.toLowerCase(Locale.ROOT)
+                .replaceAll("[^a-z0-9\\s/.-]", " ")
+                .replaceAll("\\s+", " ")
+                .trim();
     }
 
     private record ParceiroMatch(Integer idCliente, Integer idFornecedor, String nome) {}

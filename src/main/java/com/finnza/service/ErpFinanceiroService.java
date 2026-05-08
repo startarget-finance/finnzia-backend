@@ -1,7 +1,9 @@
 package com.finnza.service;
 
+import com.finnza.domain.entity.CategoriaFinanceiraEmpresa;
 import com.finnza.domain.entity.MovimentacaoFinanceira;
 import com.finnza.dto.response.DfcResponseDTO;
+import com.finnza.repository.CategoriaFinanceiraEmpresaRepository;
 import com.finnza.dto.response.ResumoFinanceiroDTO;
 import com.finnza.repository.MovimentacaoFinanceiraRepository;
 import lombok.RequiredArgsConstructor;
@@ -20,7 +22,11 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Set;
+import java.util.HashSet;
 import java.util.Optional;
+import java.util.Comparator;
 import java.util.stream.Collectors;
 
 /**
@@ -35,6 +41,7 @@ import java.util.stream.Collectors;
 public class ErpFinanceiroService {
 
     private final MovimentacaoFinanceiraRepository movimentacaoRepo;
+    private final CategoriaFinanceiraEmpresaRepository categoriaFinanceiraRepo;
     private final DashboardKpiService dashboardKpiService;
 
     public Map<String, Object> criarMovimentacaoManual(
@@ -292,14 +299,15 @@ public class ErpFinanceiroService {
     }
 
     /**
-     * Gera um DFC simplificado a partir das movimentações do ERP no período.
-     * (Receitas, Despesas, Resultado por mês).
+     * Gera DFC orientado ao Plano de Contas (categorias/subcategorias reais da empresa).
      */
     public DfcResponseDTO gerarDfc(LocalDate dataInicio, LocalDate dataTermino, Integer idEmpresa) {
         long t0 = System.currentTimeMillis();
 
         List<MovimentacaoFinanceira> all =
                 movimentacaoRepo.findAllByIdEmpresaAndDataVencimentoBetween(idEmpresa, dataInicio, dataTermino);
+        List<CategoriaFinanceiraEmpresa> categorias =
+                categoriaFinanceiraRepo.findAllByDeletedFalseAndIdEmpresaOrderByTipoAscParentIdAscOrdemAscNomeAsc(idEmpresa);
 
         List<YearMonth> meses = new ArrayList<>();
         YearMonth cur = YearMonth.from(dataInicio);
@@ -311,78 +319,112 @@ public class ErpFinanceiroService {
 
         List<String> mesesLabel = meses.stream().map(this::formatarMesPt).collect(Collectors.toList());
 
-        List<Double> receitasPorMes = new ArrayList<>();
-        List<Double> despesasPorMes = new ArrayList<>();
-        List<Double> resultadoPorMes = new ArrayList<>();
-
-        double totalReceitas = 0;
-        double totalDespesas = 0;
-
-        for (YearMonth ym : meses) {
-            LocalDate ini = ym.atDay(1);
-            LocalDate fim = ym.atEndOfMonth();
-            double rec = all.stream()
-                    .filter(m -> Boolean.FALSE.equals(m.getDebito()))
-                    .filter(m -> m.getDataVencimento() != null && !m.getDataVencimento().isBefore(ini) && !m.getDataVencimento().isAfter(fim))
-                    .mapToDouble(m -> m.getValor() != null ? m.getValor().doubleValue() : 0.0)
-                    .sum();
-            double desp = all.stream()
-                    .filter(m -> Boolean.TRUE.equals(m.getDebito()))
-                    .filter(m -> m.getDataVencimento() != null && !m.getDataVencimento().isBefore(ini) && !m.getDataVencimento().isAfter(fim))
-                    .mapToDouble(m -> m.getValor() != null ? m.getValor().doubleValue() : 0.0)
-                    .sum();
-            double res = rec - desp;
-
-            receitasPorMes.add(rec);
-            despesasPorMes.add(desp);
-            resultadoPorMes.add(res);
-
-            totalReceitas += rec;
-            totalDespesas += desp;
+        Map<YearMonth, Integer> monthIndex = new HashMap<>();
+        for (int i = 0; i < meses.size(); i++) {
+            monthIndex.put(meses.get(i), i);
         }
 
-        List<DfcResponseDTO.Linha> linhas = List.of(
-                DfcResponseDTO.Linha.builder()
-                        .nome("RECEITAS")
-                        .tipo("SECAO")
-                        .nivel(0)
-                        .valores(meses.stream().map(m -> 0.0).collect(Collectors.toList()))
-                        .total(0.0)
-                        .media(0.0)
-                        .build(),
-                DfcResponseDTO.Linha.builder()
-                        .nome("Receitas")
-                        .tipo("RECEITA")
-                        .nivel(0)
-                        .valores(receitasPorMes)
-                        .total(totalReceitas)
-                        .media(meses.isEmpty() ? 0.0 : totalReceitas / meses.size())
-                        .build(),
-                DfcResponseDTO.Linha.builder()
-                        .nome("DESPESAS")
-                        .tipo("SECAO")
-                        .nivel(0)
-                        .valores(meses.stream().map(m -> 0.0).collect(Collectors.toList()))
-                        .total(0.0)
-                        .media(0.0)
-                        .build(),
-                DfcResponseDTO.Linha.builder()
-                        .nome("Despesas")
-                        .tipo("DESPESA")
-                        .nivel(0)
-                        .valores(despesasPorMes)
-                        .total(totalDespesas)
-                        .media(meses.isEmpty() ? 0.0 : totalDespesas / meses.size())
-                        .build(),
-                DfcResponseDTO.Linha.builder()
-                        .nome("Resultado")
-                        .tipo("RESULTADO")
-                        .nivel(0)
-                        .valores(resultadoPorMes)
-                        .total(totalReceitas - totalDespesas)
-                        .media(meses.isEmpty() ? 0.0 : (totalReceitas - totalDespesas) / meses.size())
-                        .build()
-        );
+        List<CategoriaFinanceiraEmpresa> receitaRoots = categorias.stream()
+                .filter(c -> c.getTipo() == CategoriaFinanceiraEmpresa.TipoCategoria.RECEITA && c.getParentId() == null)
+                .sorted(Comparator
+                        .comparing(CategoriaFinanceiraEmpresa::getOrdem, Comparator.nullsLast(Integer::compareTo))
+                        .thenComparing(CategoriaFinanceiraEmpresa::getNome, String.CASE_INSENSITIVE_ORDER))
+                .collect(Collectors.toList());
+        List<CategoriaFinanceiraEmpresa> despesaRoots = categorias.stream()
+                .filter(c -> c.getTipo() == CategoriaFinanceiraEmpresa.TipoCategoria.DESPESA && c.getParentId() == null)
+                .sorted(Comparator
+                        .comparing(CategoriaFinanceiraEmpresa::getOrdem, Comparator.nullsLast(Integer::compareTo))
+                        .thenComparing(CategoriaFinanceiraEmpresa::getNome, String.CASE_INSENSITIVE_ORDER))
+                .collect(Collectors.toList());
+
+        Map<Long, List<CategoriaFinanceiraEmpresa>> filhosPorParent = categorias.stream()
+                .filter(c -> c.getParentId() != null)
+                .collect(Collectors.groupingBy(
+                        CategoriaFinanceiraEmpresa::getParentId,
+                        Collectors.collectingAndThen(Collectors.toList(), list -> {
+                            list.sort(Comparator
+                                    .comparing(CategoriaFinanceiraEmpresa::getOrdem, Comparator.nullsLast(Integer::compareTo))
+                                    .thenComparing(CategoriaFinanceiraEmpresa::getNome, String.CASE_INSENSITIVE_ORDER));
+                            return list;
+                        })
+                ));
+
+        Map<Long, double[]> valoresPorNo = new HashMap<>();
+        for (CategoriaFinanceiraEmpresa cat : categorias) {
+            valoresPorNo.put(cat.getId(), new double[meses.size()]);
+        }
+
+        Map<String, Long> receitaPorNome = indexarPorNome(categorias, CategoriaFinanceiraEmpresa.TipoCategoria.RECEITA);
+        Map<String, Long> despesaPorNome = indexarPorNome(categorias, CategoriaFinanceiraEmpresa.TipoCategoria.DESPESA);
+        double[] receitasSemCategoria = new double[meses.size()];
+        double[] despesasSemCategoria = new double[meses.size()];
+
+        for (MovimentacaoFinanceira mov : all) {
+            if (mov.getDataVencimento() == null || mov.getValor() == null) {
+                continue;
+            }
+            Integer idx = monthIndex.get(YearMonth.from(mov.getDataVencimento()));
+            if (idx == null) {
+                continue;
+            }
+            double valor = mov.getValor().doubleValue();
+            String catNome = normalizarChaveCategoria(mov.getNomeCategoriaFinanceira());
+
+            if (Boolean.TRUE.equals(mov.getDebito())) {
+                Long nodeId = despesaPorNome.get(catNome);
+                if (nodeId == null) {
+                    despesasSemCategoria[idx] += valor;
+                } else {
+                    valoresPorNo.get(nodeId)[idx] += valor;
+                }
+            } else {
+                Long nodeId = receitaPorNome.get(catNome);
+                if (nodeId == null) {
+                    receitasSemCategoria[idx] += valor;
+                } else {
+                    valoresPorNo.get(nodeId)[idx] += valor;
+                }
+            }
+        }
+
+        Set<Long> rootsIds = new HashSet<>();
+        receitaRoots.forEach(r -> rootsIds.add(r.getId()));
+        despesaRoots.forEach(r -> rootsIds.add(r.getId()));
+        for (Long rootId : rootsIds) {
+            acumularFilhos(rootId, filhosPorParent, valoresPorNo);
+        }
+
+        List<DfcResponseDTO.Linha> linhas = new ArrayList<>();
+        linhas.add(buildLinha("RECEITAS", "SECAO", 0, arrayZeros(meses.size()), meses.size()));
+        for (CategoriaFinanceiraEmpresa root : receitaRoots) {
+            appendArvoreDfc(linhas, root, filhosPorParent, valoresPorNo, "RECEITA", 0);
+        }
+        if (temValor(receitasSemCategoria)) {
+            linhas.add(buildLinha("Sem categoria (Receitas)", "RECEITA", 0, receitasSemCategoria, meses.size()));
+        }
+
+        double[] subtotalReceitas = somarPorPrefixo(linhas, "RECEITA", meses.size());
+        linhas.add(buildLinha("Subtotal Receitas", "SUBTOTAL_RECEITA", 0, subtotalReceitas, meses.size()));
+
+        linhas.add(buildLinha("DESPESAS", "SECAO", 0, arrayZeros(meses.size()), meses.size()));
+        for (CategoriaFinanceiraEmpresa root : despesaRoots) {
+            appendArvoreDfc(linhas, root, filhosPorParent, valoresPorNo, "DESPESA", 0);
+        }
+        if (temValor(despesasSemCategoria)) {
+            linhas.add(buildLinha("Sem categoria (Despesas)", "DESPESA", 0, despesasSemCategoria, meses.size()));
+        }
+
+        double[] subtotalDespesas = somarPorPrefixo(linhas, "DESPESA", meses.size());
+        linhas.add(buildLinha("Subtotal Despesas", "SUBTOTAL_DESPESA", 0, subtotalDespesas, meses.size()));
+
+        double[] resultadoPorMes = new double[meses.size()];
+        for (int i = 0; i < meses.size(); i++) {
+            resultadoPorMes[i] = subtotalReceitas[i] - subtotalDespesas[i];
+        }
+        linhas.add(buildLinha("Resultado", "RESULTADO", 0, resultadoPorMes, meses.size()));
+
+        double totalReceitas = sumArray(subtotalReceitas);
+        double totalDespesas = sumArray(subtotalDespesas);
 
         DfcResponseDTO.Indicadores ind = DfcResponseDTO.Indicadores.builder()
                 .totalReceitas(totalReceitas)
@@ -429,6 +471,108 @@ public class ErpFinanceiroService {
         String mm = mesesPt[ym.getMonthValue() - 1];
         String yy = String.valueOf(ym.getYear()).substring(2);
         return mm + "/" + yy;
+    }
+
+    private Map<String, Long> indexarPorNome(
+            List<CategoriaFinanceiraEmpresa> categorias,
+            CategoriaFinanceiraEmpresa.TipoCategoria tipo
+    ) {
+        Map<String, Long> out = new HashMap<>();
+        for (CategoriaFinanceiraEmpresa c : categorias) {
+            if (c.getTipo() != tipo) {
+                continue;
+            }
+            String key = normalizarChaveCategoria(c.getNome());
+            out.putIfAbsent(key, c.getId());
+        }
+        return out;
+    }
+
+    private String normalizarChaveCategoria(String nome) {
+        return nome == null ? "" : nome.trim().toLowerCase();
+    }
+
+    private void acumularFilhos(
+            Long nodeId,
+            Map<Long, List<CategoriaFinanceiraEmpresa>> filhosPorParent,
+            Map<Long, double[]> valoresPorNo
+    ) {
+        List<CategoriaFinanceiraEmpresa> filhos = filhosPorParent.getOrDefault(nodeId, List.of());
+        for (CategoriaFinanceiraEmpresa filho : filhos) {
+            acumularFilhos(filho.getId(), filhosPorParent, valoresPorNo);
+            double[] pai = valoresPorNo.get(nodeId);
+            double[] valFilho = valoresPorNo.get(filho.getId());
+            for (int i = 0; i < pai.length; i++) {
+                pai[i] += valFilho[i];
+            }
+        }
+    }
+
+    private void appendArvoreDfc(
+            List<DfcResponseDTO.Linha> out,
+            CategoriaFinanceiraEmpresa node,
+            Map<Long, List<CategoriaFinanceiraEmpresa>> filhosPorParent,
+            Map<Long, double[]> valoresPorNo,
+            String tipoLinha,
+            int depth
+    ) {
+        int nivel = depth <= 0 ? 0 : 1;
+        out.add(buildLinha(node.getNome(), tipoLinha, nivel, valoresPorNo.get(node.getId()), valoresPorNo.get(node.getId()).length));
+        for (CategoriaFinanceiraEmpresa filho : filhosPorParent.getOrDefault(node.getId(), List.of())) {
+            appendArvoreDfc(out, filho, filhosPorParent, valoresPorNo, tipoLinha, depth + 1);
+        }
+    }
+
+    private DfcResponseDTO.Linha buildLinha(String nome, String tipo, int nivel, double[] valores, int mesesCount) {
+        List<Double> vals = new ArrayList<>(mesesCount);
+        double total = 0.0;
+        for (double v : valores) {
+            vals.add(v);
+            total += v;
+        }
+        return DfcResponseDTO.Linha.builder()
+                .nome(nome)
+                .tipo(tipo)
+                .nivel(nivel)
+                .valores(vals)
+                .total(total)
+                .media(mesesCount == 0 ? 0.0 : total / mesesCount)
+                .build();
+    }
+
+    private double[] arrayZeros(int size) {
+        return new double[size];
+    }
+
+    private boolean temValor(double[] values) {
+        for (double v : values) {
+            if (Math.abs(v) > 1e-9) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private double[] somarPorPrefixo(List<DfcResponseDTO.Linha> linhas, String tipo, int size) {
+        double[] out = new double[size];
+        for (DfcResponseDTO.Linha l : linhas) {
+            if (!tipo.equals(l.getTipo())) {
+                continue;
+            }
+            List<Double> vals = l.getValores();
+            for (int i = 0; i < size && i < vals.size(); i++) {
+                out[i] += vals.get(i) != null ? vals.get(i) : 0.0;
+            }
+        }
+        return out;
+    }
+
+    private double sumArray(double[] values) {
+        double total = 0;
+        for (double v : values) {
+            total += v;
+        }
+        return total;
     }
 
     private ResumoFinanceiroDTO.BlocoResumo calcularBlocoResumo(List<MovimentacaoFinanceira> movs) {

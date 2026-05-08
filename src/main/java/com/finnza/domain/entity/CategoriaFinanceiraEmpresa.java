@@ -11,7 +11,9 @@ import java.time.LocalDateTime;
 @Entity
 @Table(name = "categoria_financeira_empresa", indexes = {
         @Index(name = "idx_cat_fin_emp_empresa_tipo", columnList = "id_empresa,tipo"),
-        @Index(name = "idx_cat_fin_emp_deleted", columnList = "deleted")
+        @Index(name = "idx_cat_fin_emp_deleted", columnList = "deleted"),
+        @Index(name = "idx_cat_fin_parent_empresa", columnList = "id_empresa,parent_id"),
+        @Index(name = "idx_cat_fin_empresa_tipo_parent", columnList = "id_empresa,tipo,parent_id")
 })
 @EntityListeners(AuditingEntityListener.class)
 @Data
@@ -36,11 +38,16 @@ public class CategoriaFinanceiraEmpresa {
     @Column(nullable = false, length = 16)
     private TipoCategoria tipo;
 
-    @Column(name = "nome_categoria", nullable = false, length = 120)
-    private String nomeCategoria;
+    /** Nome deste nó (qualquer nível: categoria, subcategoria, etc.). */
+    @Column(name = "nome", nullable = false, length = 120)
+    private String nome;
 
-    @Column(name = "nome_subcategoria", length = 120)
-    private String nomeSubcategoria;
+    @Column(name = "parent_id")
+    private Long parentId;
+
+    @Column(name = "ordem", nullable = false)
+    @Builder.Default
+    private Integer ordem = 0;
 
     @CreatedDate
     @Column(name = "data_criacao", nullable = false, updatable = false)

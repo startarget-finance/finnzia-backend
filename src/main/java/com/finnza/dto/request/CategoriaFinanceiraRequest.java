@@ -21,7 +21,14 @@ public class CategoriaFinanceiraRequest {
     @Size(max = 16)
     private String tipo; // receita | despesa
 
-    @NotBlank
+    /** Nome do novo nó (qualquer nível). */
+    @Size(max = 120)
+    private String nome;
+
+    /** Pai na árvore; null = raiz (categoria de 1º nível). */
+    private Long parentId;
+
+    /** Legado (import / clientes antigos): mapeado para {@code nome} + raiz se {@code nome} vazio. */
     @Size(max = 120)
     private String nomeCategoria;
 

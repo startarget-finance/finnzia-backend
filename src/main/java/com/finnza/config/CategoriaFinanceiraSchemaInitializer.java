@@ -27,8 +27,9 @@ public class CategoriaFinanceiraSchemaInitializer implements ApplicationRunner {
                     id BIGSERIAL PRIMARY KEY,
                     id_empresa INTEGER NOT NULL,
                     tipo VARCHAR(16) NOT NULL,
-                    nome_categoria VARCHAR(120) NOT NULL,
-                    nome_subcategoria VARCHAR(120),
+                    nome VARCHAR(120) NOT NULL,
+                    parent_id BIGINT,
+                    ordem INTEGER NOT NULL DEFAULT 0,
                     data_criacao TIMESTAMP NOT NULL DEFAULT NOW(),
                     data_atualizacao TIMESTAMP,
                     data_exclusao TIMESTAMP,
@@ -42,6 +43,22 @@ public class CategoriaFinanceiraSchemaInitializer implements ApplicationRunner {
             jdbcTemplate.execute("""
                 CREATE INDEX IF NOT EXISTS idx_cat_fin_emp_deleted
                     ON categoria_financeira_empresa (deleted)
+                """);
+            jdbcTemplate.execute("""
+                CREATE INDEX IF NOT EXISTS idx_cat_fin_parent_empresa
+                    ON categoria_financeira_empresa (id_empresa, parent_id)
+                """);
+            jdbcTemplate.execute("""
+                ALTER TABLE categoria_financeira_empresa
+                    ADD COLUMN IF NOT EXISTS nome VARCHAR(120)
+                """);
+            jdbcTemplate.execute("""
+                ALTER TABLE categoria_financeira_empresa
+                    ADD COLUMN IF NOT EXISTS parent_id BIGINT
+                """);
+            jdbcTemplate.execute("""
+                ALTER TABLE categoria_financeira_empresa
+                    ADD COLUMN IF NOT EXISTS ordem INTEGER NOT NULL DEFAULT 0
                 """);
             jdbcTemplate.execute("""
                 CREATE TABLE IF NOT EXISTS movimentacao_historico (

@@ -113,53 +113,55 @@ public class CategoriaFinanceiraService {
      */
     public List<CategoriaFinanceiraDTO> renomearNo(
             String emailUsuario, Integer idEmpresa, Long nodeId, String nomeNovo) {
-        validarAcesso(emailUsuario, idEmpresa);
+        if (idEmpresa == null || idEmpresa <= 0) {
+            throw new IllegalArgumentException("idEmpresa inválido.");
+        }
         String nome = normalizar(nomeNovo);
         if (nome.isEmpty()) {
             throw new IllegalArgumentException("Nome do plano de contas é obrigatório.");
         }
         CategoriaFinanceiraEmpresa node = repository.findByIdAndDeletedFalse(nodeId)
                 .orElseThrow(() -> new IllegalArgumentException("Item do plano de contas não encontrado."));
-        if (!Objects.equals(node.getIdEmpresa(), idEmpresa)) {
-            throw new IllegalArgumentException("Item não pertence à empresa selecionada.");
-        }
+        int empresaDoNo = idEmpresaDoNo(node);
+        validarAcesso(emailUsuario, empresaDoNo);
         if (nome.equalsIgnoreCase(node.getNome())) {
-            return listar(emailUsuario, idEmpresa);
+            return listar(emailUsuario, empresaDoNo);
         }
         CategoriaFinanceiraEmpresa.TipoCategoria tipo = node.getTipo();
         Long parentId = node.getParentId();
         if (parentId == null || parentId <= 0) {
             Optional<CategoriaFinanceiraEmpresa> clash = repository
-                    .findFirstByDeletedFalseAndIdEmpresaAndTipoAndParentIdIsNullAndNomeIgnoreCase(idEmpresa, tipo, nome);
+                    .findFirstByDeletedFalseAndIdEmpresaAndTipoAndParentIdIsNullAndNomeIgnoreCase(empresaDoNo, tipo, nome);
             if (clash.isPresent() && !clash.get().getId().equals(nodeId)) {
                 throw new IllegalArgumentException("Já existe categoria com este nome.");
             }
         } else {
             Optional<CategoriaFinanceiraEmpresa> clash = repository
                     .findFirstByDeletedFalseAndIdEmpresaAndTipoAndParentIdAndNomeIgnoreCase(
-                            idEmpresa, tipo, parentId, nome);
+                            empresaDoNo, tipo, parentId, nome);
             if (clash.isPresent() && !clash.get().getId().equals(nodeId)) {
                 throw new IllegalArgumentException("Já existe conta com este nome neste agrupamento.");
             }
         }
         node.setNome(nome);
         repository.save(node);
-        return listar(emailUsuario, idEmpresa);
+        return listar(emailUsuario, empresaDoNo);
     }
 
     /**
      * Remove o nó e toda a subárvore (soft delete).
      */
     public List<CategoriaFinanceiraDTO> excluirNo(String emailUsuario, Integer idEmpresa, Long nodeId) {
-        validarAcesso(emailUsuario, idEmpresa);
+        if (idEmpresa == null || idEmpresa <= 0) {
+            throw new IllegalArgumentException("idEmpresa inválido.");
+        }
         CategoriaFinanceiraEmpresa node = repository.findByIdAndDeletedFalse(nodeId)
                 .orElseThrow(() -> new IllegalArgumentException("Item do plano de contas não encontrado."));
-        if (!Objects.equals(node.getIdEmpresa(), idEmpresa)) {
-            throw new IllegalArgumentException("Item não pertence à empresa selecionada.");
-        }
-        Set<Long> ids = coletarSubarvoreIds(node.getId(), idEmpresa);
+        int empresaDoNo = idEmpresaDoNo(node);
+        validarAcesso(emailUsuario, empresaDoNo);
+        Set<Long> ids = coletarSubarvoreIds(node.getId(), empresaDoNo);
         List<CategoriaFinanceiraEmpresa> todos = repository
-                .findAllByDeletedFalseAndIdEmpresaOrderByTipoAscParentIdAscOrdemAscNomeAsc(idEmpresa);
+                .findAllByDeletedFalseAndIdEmpresaOrderByTipoAscParentIdAscOrdemAscNomeAsc(empresaDoNo);
         List<CategoriaFinanceiraEmpresa> toSave = new ArrayList<>();
         for (CategoriaFinanceiraEmpresa e : todos) {
             if (ids.contains(e.getId())) {
@@ -168,7 +170,16 @@ public class CategoriaFinanceiraService {
             }
         }
         repository.saveAll(toSave);
-        return listar(emailUsuario, idEmpresa);
+        return listar(emailUsuario, empresaDoNo);
+    }
+
+    /** Tenant real da linha (evita 400 quando o query param idEmpresa não bate com o cadastro). */
+    private static int idEmpresaDoNo(CategoriaFinanceiraEmpresa node) {
+        Integer raw = node.getIdEmpresa();
+        if (raw == null || raw <= 0) {
+            throw new IllegalArgumentException("Registro de categoria com empresa inválida.");
+        }
+        return raw;
     }
 
     private Set<Long> coletarSubarvoreIds(Long rootId, Integer idEmpresa) {

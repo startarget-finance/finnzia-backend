@@ -6,6 +6,7 @@ import com.finnza.dto.response.CategoriaFinanceiraDTO;
 import com.finnza.service.CategoriaFinanceiraService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.Authentication;
@@ -19,6 +20,7 @@ import java.util.Map;
 @RequestMapping("/api/categorias-financeiras")
 @CrossOrigin(origins = "*")
 @RequiredArgsConstructor
+@Slf4j
 public class CategoriaFinanceiraController {
 
     private final CategoriaFinanceiraService service;
@@ -31,6 +33,8 @@ public class CategoriaFinanceiraController {
             return ResponseEntity.ok(lista);
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(Map.of("mensagem", e.getMessage()));
+        } catch (Exception e) {
+            return tratarErroInesperado("listar", null, idEmpresa, e);
         }
     }
 
@@ -41,6 +45,8 @@ public class CategoriaFinanceiraController {
             return ResponseEntity.ok(service.salvar(emailAutenticado(), body));
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(Map.of("mensagem", e.getMessage()));
+        } catch (Exception e) {
+            return tratarErroInesperado("salvar", null, body != null ? body.getIdEmpresa() : null, e);
         }
     }
 
@@ -54,6 +60,8 @@ public class CategoriaFinanceiraController {
             return ResponseEntity.ok(service.renomearNo(emailAutenticado(), idEmpresa, id, body.getNome()));
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(Map.of("mensagem", e.getMessage()));
+        } catch (Exception e) {
+            return tratarErroInesperado("renomear", id, idEmpresa, e);
         }
     }
 
@@ -70,7 +78,20 @@ public class CategoriaFinanceiraController {
             return ResponseEntity.ok(service.excluirNo(emailAutenticado(), idEmpresa, id));
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(Map.of("mensagem", e.getMessage()));
+        } catch (Exception e) {
+            return tratarErroInesperado("excluir", id, idEmpresa, e);
         }
+    }
+
+    private ResponseEntity<Map<String, String>> tratarErroInesperado(
+            String operacao, Long nodeId, Integer idEmpresa, Exception e
+    ) {
+        String detalhe = e.getMessage() != null && !e.getMessage().isBlank()
+                ? e.getMessage()
+                : e.getClass().getSimpleName();
+        log.error("Erro inesperado em categorias-financeiras op={} nodeId={} idEmpresa={}",
+                operacao, nodeId, idEmpresa, e);
+        return ResponseEntity.badRequest().body(Map.of("mensagem", "Erro em " + operacao + ": " + detalhe));
     }
 
     private static String emailAutenticado() {

@@ -265,6 +265,11 @@ public class CategoriaFinanceiraService {
         if (idEmpresa == null || idEmpresa <= 0) {
             throw new IllegalArgumentException("idEmpresa inválido.");
         }
+        // Alinha com ErpFinanceiroController: usuário sem vínculos em empresa_usuario (single-tenant)
+        // não é bloqueado só por ausência do mapeamento legado.
+        if (!usuarioEmpresaService.usuarioTemEmpresasAtivasPorEmail(emailUsuario)) {
+            return;
+        }
         if (!usuarioEmpresaService.validarAcessoUsuarioEmpresa(emailUsuario, idEmpresa)) {
             throw new IllegalArgumentException("Sem acesso à empresa " + idEmpresa);
         }

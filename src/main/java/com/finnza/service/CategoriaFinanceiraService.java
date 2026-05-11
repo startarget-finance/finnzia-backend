@@ -276,15 +276,22 @@ public class CategoriaFinanceiraService {
         if (idEmpresa == null || idEmpresa <= 0) {
             throw new IllegalArgumentException("idEmpresa inválido.");
         }
-        // Alinha com ErpFinanceiroController: usuário sem vínculos em empresa_usuario (single-tenant)
-        // não é bloqueado só por ausência do mapeamento legado.
-        if (!usuarioEmpresaService.usuarioTemEmpresasAtivasPorEmail(emailUsuario)) {
+        // Regra segura:
+        // 1) usuário com vínculos ativos em empresa_usuario precisa ter acesso explícito à empresa;
+        // 2) sem vínculos ativos, aceita somente o contexto single-tenant resolvido pelo serviço.
+        if (usuarioEmpresaService.usuarioTemEmpresasAtivasPorEmail(emailUsuario)) {
+            if (!usuarioEmpresaService.validarAcessoUsuarioEmpresa(emailUsuario, idEmpresa)) {
+                throw new IllegalArgumentException("Sem acesso à empresa " + idEmpresa);
+            }
             return;
         }
-        // Em produção há cenários legados onde o seletor de empresa e os vínculos em empresa_usuario
-        // ficam momentaneamente divergentes; para não travar o plano de contas com BAD_REQUEST,
-        // seguimos o mesmo comportamento tolerante do ERP e não bloqueamos aqui.
-        usuarioEmpresaService.validarAcessoUsuarioEmpresa(emailUsuario, idEmpresa);
+
+        Integer contextoSingleTenant = usuarioEmpresaService
+                .obterIdEmpresaContextoPorEmail(emailUsuario)
+                .orElse(null);
+        if (!Objects.equals(contextoSingleTenant, idEmpresa)) {
+            throw new IllegalArgumentException("Sem acesso à empresa " + idEmpresa);
+        }
     }
 
     private static CategoriaFinanceiraEmpresa.TipoCategoria parseTipo(String tipo) {

@@ -211,13 +211,13 @@ public class CategoriaFinanceiraService {
         for (List<CategoriaFinanceiraEmpresa> list : byParent.values()) {
             list.sort(Comparator
                     .comparing(CategoriaFinanceiraEmpresa::getOrdem, Comparator.nullsLast(Integer::compareTo))
-                    .thenComparing(CategoriaFinanceiraEmpresa::getNome, String.CASE_INSENSITIVE_ORDER));
+                    .thenComparing(CategoriaFinanceiraEmpresa::getNome, Comparator.nullsLast(String.CASE_INSENSITIVE_ORDER)));
         }
         List<CategoriaFinanceiraEmpresa> roots = byParent.getOrDefault(-1L, List.of());
         roots.sort(Comparator
                 .comparing(CategoriaFinanceiraEmpresa::getTipo)
                 .thenComparing(CategoriaFinanceiraEmpresa::getOrdem, Comparator.nullsLast(Integer::compareTo))
-                .thenComparing(CategoriaFinanceiraEmpresa::getNome, String.CASE_INSENSITIVE_ORDER));
+                .thenComparing(CategoriaFinanceiraEmpresa::getNome, Comparator.nullsLast(String.CASE_INSENSITIVE_ORDER)));
         return roots.stream().map(r -> toRootDto(r, byParent)).collect(Collectors.toList());
     }
 
@@ -231,7 +231,7 @@ public class CategoriaFinanceiraService {
         return CategoriaFinanceiraDTO.builder()
                 .id(id)
                 .tipo(tipoStr)
-                .nome(root.getNome())
+                .nome(safeNome(root.getNome()))
                 .subcategorias(filhos)
                 .dataCriacao(root.getDataCriacao())
                 .dataAtualizacao(root.getDataAtualizacao())
@@ -252,9 +252,13 @@ public class CategoriaFinanceiraService {
     ) {
         return SubcategoriaFinanceiraDTO.builder()
                 .id(node.getId())
-                .nome(node.getNome())
+                .nome(safeNome(node.getNome()))
                 .children(nosFilhosParaDto(node.getId(), byParent))
                 .build();
+    }
+
+    private static String safeNome(String nome) {
+        return (nome == null || nome.isBlank()) ? "Sem nome" : nome;
     }
 
     private void validarAcesso(String emailUsuario, Integer idEmpresa) {

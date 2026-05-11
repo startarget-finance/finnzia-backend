@@ -224,7 +224,8 @@ public class CategoriaFinanceiraService {
                     .comparing(CategoriaFinanceiraEmpresa::getOrdem, Comparator.nullsLast(Integer::compareTo))
                     .thenComparing(CategoriaFinanceiraEmpresa::getNome, Comparator.nullsLast(String.CASE_INSENSITIVE_ORDER)));
         }
-        List<CategoriaFinanceiraEmpresa> roots = byParent.getOrDefault(-1L, List.of());
+        // Cópia mutável: getOrDefault(-1, List.of()) seria imutável e roots.sort() quebra com UnsupportedOperationException.
+        List<CategoriaFinanceiraEmpresa> roots = new ArrayList<>(byParent.getOrDefault(-1L, List.of()));
         roots.sort(Comparator
                 .comparing(CategoriaFinanceiraEmpresa::getTipo)
                 .thenComparing(CategoriaFinanceiraEmpresa::getOrdem, Comparator.nullsLast(Integer::compareTo))

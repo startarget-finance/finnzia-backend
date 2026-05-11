@@ -113,16 +113,13 @@ public class CategoriaFinanceiraService {
      */
     public List<CategoriaFinanceiraDTO> renomearNo(
             String emailUsuario, Integer idEmpresa, Long nodeId, String nomeNovo) {
-        if (idEmpresa == null || idEmpresa <= 0) {
-            throw new IllegalArgumentException("idEmpresa inválido.");
-        }
         String nome = normalizar(nomeNovo);
         if (nome.isEmpty()) {
             throw new IllegalArgumentException("Nome do plano de contas é obrigatório.");
         }
         CategoriaFinanceiraEmpresa node = repository.findByIdAndDeletedFalse(nodeId)
                 .orElseThrow(() -> new IllegalArgumentException("Item do plano de contas não encontrado."));
-        int empresaDoNo = idEmpresaDoNo(node);
+        int empresaDoNo = idEmpresaDoNo(node, idEmpresa);
         validarAcesso(emailUsuario, empresaDoNo);
         if (nome.equalsIgnoreCase(node.getNome())) {
             return listar(emailUsuario, empresaDoNo);
@@ -152,34 +149,37 @@ public class CategoriaFinanceiraService {
      * Remove o nó e toda a subárvore (soft delete).
      */
     public List<CategoriaFinanceiraDTO> excluirNo(String emailUsuario, Integer idEmpresa, Long nodeId) {
-        if (idEmpresa == null || idEmpresa <= 0) {
-            throw new IllegalArgumentException("idEmpresa inválido.");
-        }
         CategoriaFinanceiraEmpresa node = repository.findByIdAndDeletedFalse(nodeId)
                 .orElseThrow(() -> new IllegalArgumentException("Item do plano de contas não encontrado."));
-        int empresaDoNo = idEmpresaDoNo(node);
+        int empresaDoNo = idEmpresaDoNo(node, idEmpresa);
         validarAcesso(emailUsuario, empresaDoNo);
         Set<Long> ids = coletarSubarvoreIds(node.getId(), empresaDoNo);
-        List<CategoriaFinanceiraEmpresa> todos = repository
-                .findAllByDeletedFalseAndIdEmpresaOrderByTipoAscParentIdAscOrdemAscNomeAsc(empresaDoNo);
         List<CategoriaFinanceiraEmpresa> toSave = new ArrayList<>();
-        for (CategoriaFinanceiraEmpresa e : todos) {
-            if (ids.contains(e.getId())) {
-                e.marcarExcluido();
-                toSave.add(e);
+        for (CategoriaFinanceiraEmpresa e : repository.findAllById(ids)) {
+            if (Boolean.TRUE.equals(e.getDeleted())) {
+                continue;
             }
+            e.marcarExcluido();
+            toSave.add(e);
         }
         repository.saveAll(toSave);
         return listar(emailUsuario, empresaDoNo);
     }
 
-    /** Tenant real da linha (evita 400 quando o query param idEmpresa não bate com o cadastro). */
-    private static int idEmpresaDoNo(CategoriaFinanceiraEmpresa node) {
+    /**
+     * Tenant da linha. Legado pode ter {@code id_empresa} nulo ou zero no banco; usa o {@code idEmpresa}
+     * da requisição (já validado no contexto da empresa selecionada) como fallback.
+     */
+    private static int idEmpresaDoNo(CategoriaFinanceiraEmpresa node, Integer idEmpresaQuery) {
         Integer raw = node.getIdEmpresa();
-        if (raw == null || raw <= 0) {
-            throw new IllegalArgumentException("Registro de categoria com empresa inválida.");
+        if (raw != null && raw > 0) {
+            return raw;
         }
-        return raw;
+        if (idEmpresaQuery != null && idEmpresaQuery > 0) {
+            return idEmpresaQuery;
+        }
+        throw new IllegalArgumentException(
+                "Registro legado sem empresa. Selecione a empresa no topo, recarregue a página e tente excluir novamente.");
     }
 
     private Set<Long> coletarSubarvoreIds(Long rootId, Integer idEmpresa) {

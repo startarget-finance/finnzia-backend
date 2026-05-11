@@ -48,7 +48,7 @@ public class CategoriaFinanceiraController {
     @PreAuthorize("hasPermission(null, 'MOVIMENTACOES')")
     public ResponseEntity<?> renomearNo(
             @PathVariable Long id,
-            @RequestParam("idEmpresa") Integer idEmpresa,
+            @RequestParam(value = "idEmpresa", required = false) Integer idEmpresa,
             @Valid @RequestBody RenomearCategoriaFinanceiraRequest body) {
         try {
             return ResponseEntity.ok(service.renomearNo(emailAutenticado(), idEmpresa, id, body.getNome()));
@@ -64,7 +64,7 @@ public class CategoriaFinanceiraController {
     @PreAuthorize("hasPermission(null, 'MOVIMENTACOES')")
     public ResponseEntity<?> excluirNo(
             @PathVariable Long id,
-            @RequestParam("idEmpresa") Integer idEmpresa
+            @RequestParam(value = "idEmpresa", required = false) Integer idEmpresa
     ) {
         try {
             return ResponseEntity.ok(service.excluirNo(emailAutenticado(), idEmpresa, id));

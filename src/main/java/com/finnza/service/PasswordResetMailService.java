@@ -104,8 +104,13 @@ public class PasswordResetMailService {
      */
     public void sendNovaContaConvite(String recipientEmail, String recipientName, String senhaProvisoria) {
         if (!mailEnabled || !smtpReady()) {
-            log.info("Boas-vindas: e-mail desligado ou SMTP incompleto; conta criada para {} sem envio automático.",
-                    maskEmail(recipientEmail));
+            log.warn(
+                    "Convite de nova conta: e-mail não enviado para {}. "
+                            + "Ative APP_MAIL_PASSWORD_RESET_ENABLED=true e defina MAIL_USERNAME e MAIL_PASSWORD (SMTP) no ambiente; "
+                            + "mailEnabled={}, smtpReady={}.",
+                    maskEmail(recipientEmail),
+                    mailEnabled,
+                    smtpReady());
             return;
         }
         String base = frontendBaseUrl.trim().replaceAll("/+$", "");

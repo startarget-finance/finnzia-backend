@@ -11,6 +11,7 @@ import org.springframework.data.annotation.LastModifiedDate;
 import org.springframework.data.jpa.domain.support.AuditingEntityListener;
 
 import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.util.HashSet;
 import java.util.Set;
 
@@ -216,10 +217,11 @@ public class Usuario {
     }
 
     /**
-     * Atualiza o último acesso
+     * Atualiza o último acesso (fuso America/Sao_Paulo — alinhado ao uso do produto no Brasil;
+     * evita gravar o relógio UTC da JVM em servidores como Render).
      */
     public void atualizarUltimoAcesso() {
-        this.ultimoAcesso = LocalDateTime.now();
+        this.ultimoAcesso = LocalDateTime.now(ZoneId.of("America/Sao_Paulo"));
     }
 
     /**

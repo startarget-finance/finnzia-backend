@@ -9,12 +9,16 @@ import org.springframework.core.env.MapPropertySource;
 import java.net.URI;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * Se {@code spring.datasource.url} ficar vazia (ex.: {@code SPRING_DATASOURCE_URL=""} no IntelliJ),
  * o valor do {@code application.properties} deixa de valer; este processador roda
  * {@linkplain Ordered#LOWEST_PRECEDENCE por último} e recoloca o Postgres local no topo
  * das propriedades.
+ * <p>Em provedores como Render, Postgres costuma exigir TLS: URLs {@code DB_URL} manuais sem
+ * {@code sslmode=require} falham com {@code EOFException} no driver; este processador acrescenta
+ * {@code sslmode=require} para JDBC remoto quando faltar.
  */
 public class FinnzaDatasourceEnvironmentPostProcessor implements EnvironmentPostProcessor, Ordered {
 
@@ -49,6 +53,15 @@ public class FinnzaDatasourceEnvironmentPostProcessor implements EnvironmentPost
         String effectiveUrl = url;
         String effectiveUser = user;
 
+        String urlWithSsl = ensureSslModeIfRemotePostgres(url);
+        if (urlWithSsl != null && !Objects.equals(url, urlWithSsl)) {
+            environment.getPropertySources().addFirst(
+                    new MapPropertySource("finnza-jdbc-ssl-normalize", Map.of(PROP_URL, urlWithSsl)));
+            url = urlWithSsl;
+            missingUrl = url.isBlank();
+            effectiveUrl = url;
+        }
+
         if (!missingUrl && !missingUser && !missingDriver
                 && !isLocalPostgresUrl(url, user, osUser)) {
             return;
@@ -56,8 +69,9 @@ public class FinnzaDatasourceEnvironmentPostProcessor implements EnvironmentPost
 
         if (missingUrl) {
             if (jdbcDatabaseUrl != null && !jdbcDatabaseUrl.isBlank()) {
-                defaults.put(PROP_URL, jdbcDatabaseUrl);
-                effectiveUrl = jdbcDatabaseUrl;
+                String jdbcNorm = ensureSslModeIfRemotePostgres(jdbcDatabaseUrl);
+                defaults.put(PROP_URL, jdbcNorm != null ? jdbcNorm : jdbcDatabaseUrl);
+                effectiveUrl = jdbcNorm != null ? jdbcNorm : jdbcDatabaseUrl;
             } else if (databaseUrl != null && !databaseUrl.isBlank()) {
                 ParsedDatabaseUrl parsed = parseDatabaseUrl(databaseUrl);
                 if (parsed.jdbcUrl != null && !parsed.jdbcUrl.isBlank()) {
@@ -124,6 +138,27 @@ public class FinnzaDatasourceEnvironmentPostProcessor implements EnvironmentPost
             return true;
         }
         return configuredUser.equalsIgnoreCase(osUser);
+    }
+
+    /**
+     * Render e outros Postgres na nuvem exigem TLS; {@code DB_URL} sem {@code sslmode} costuma
+     * encerrar a conexão com {@code EOFException}.
+     */
+    static String ensureSslModeIfRemotePostgres(String jdbcUrl) {
+        if (jdbcUrl == null || jdbcUrl.isBlank()) {
+            return jdbcUrl;
+        }
+        String lower = jdbcUrl.toLowerCase();
+        if (!lower.startsWith("jdbc:postgresql:")) {
+            return jdbcUrl;
+        }
+        if (lower.contains("localhost") || lower.contains("127.0.0.1")) {
+            return jdbcUrl;
+        }
+        if (lower.contains("sslmode=")) {
+            return jdbcUrl;
+        }
+        return jdbcUrl.contains("?") ? jdbcUrl + "&sslmode=require" : jdbcUrl + "?sslmode=require";
     }
 
     private ParsedDatabaseUrl parseDatabaseUrl(String databaseUrl) {

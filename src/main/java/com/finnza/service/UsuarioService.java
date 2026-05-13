@@ -20,6 +20,7 @@ import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import org.springframework.data.jpa.domain.Specification;
+import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.crypto.password.PasswordEncoder;
@@ -28,6 +29,11 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.UUID;
+
+import java.security.SecureRandom;
+import java.time.LocalDateTime;
 
 /**
  * Serviço para gerenciamento de usuários
@@ -35,6 +41,8 @@ import java.util.Map;
 @Service
 @Transactional
 public class UsuarioService {
+
+    private static final SecureRandom RANDOM = new SecureRandom();
 
     @Autowired
     private UsuarioRepository usuarioRepository;
@@ -47,6 +55,9 @@ public class UsuarioService {
 
     @Autowired
     private UsuarioEmpresaService usuarioEmpresaService;
+
+    @Autowired
+    private PasswordResetMailService passwordResetMailService;
 
     /**
      * Cria um novo usuário
@@ -70,6 +81,9 @@ public class UsuarioService {
         criarPermissoesPadrao(usuario);
 
         usuario = usuarioRepository.save(usuario);
+
+        passwordResetMailService.sendNovaContaConvite(
+                usuario.getEmail(), usuario.getNome(), request.getSenha());
 
         return UsuarioDTO.fromEntity(usuario);
     }
@@ -106,6 +120,9 @@ public class UsuarioService {
 
         // Salvar novamente com permissões
         usuario = usuarioRepository.save(usuario);
+
+        passwordResetMailService.sendNovaContaConvite(
+                usuario.getEmail(), usuario.getNome(), request.getSenha());
 
         return UsuarioDTO.fromEntity(usuario);
     }
@@ -337,6 +354,22 @@ public class UsuarioService {
     }
 
     /**
+     * Envia por e-mail um código de 6 dígitos para confirmar alteração de senha em Meu perfil.
+     */
+    public void solicitarCodigoAlteracaoSenha() {
+        String email = getEmailUsuarioLogado();
+        Usuario usuario = usuarioRepository.findByEmail(email)
+                .orElseThrow(() -> new RuntimeException("Usuário não encontrado"));
+
+        String codigo = String.format("%06d", RANDOM.nextInt(1_000_000));
+        usuario.setAlteracaoSenhaCodigoHash(passwordEncoder.encode(codigo));
+        usuario.setAlteracaoSenhaCodigoExpiracao(LocalDateTime.now().plusMinutes(15));
+        usuarioRepository.save(usuario);
+
+        passwordResetMailService.sendAlteracaoSenhaCodigo(usuario.getEmail(), usuario.getNome(), codigo);
+    }
+
+    /**
      * Altera a senha do usuário logado
      */
     public void alterarMinhaSenha(AlterarSenhaRequest request) {
@@ -344,13 +377,23 @@ public class UsuarioService {
         Usuario usuario = usuarioRepository.findByEmail(email)
                 .orElseThrow(() -> new RuntimeException("Usuário não encontrado"));
 
-        // Verificar senha atual
         if (!passwordEncoder.matches(request.getSenhaAtual(), usuario.getSenha())) {
             throw new RuntimeException("Senha atual incorreta");
         }
 
-        // Atualizar senha
+        if (usuario.getAlteracaoSenhaCodigoHash() == null
+                || usuario.getAlteracaoSenhaCodigoExpiracao() == null
+                || usuario.getAlteracaoSenhaCodigoExpiracao().isBefore(LocalDateTime.now())) {
+            throw new RuntimeException(
+                    "Código ausente ou expirado. Clique em \"Enviar código por e-mail\" e use o código em até 15 minutos.");
+        }
+        if (!passwordEncoder.matches(request.getCodigo().trim(), usuario.getAlteracaoSenhaCodigoHash())) {
+            throw new RuntimeException("Código de verificação inválido.");
+        }
+
         usuario.setSenha(passwordEncoder.encode(request.getNovaSenha()));
+        usuario.setAlteracaoSenhaCodigoHash(null);
+        usuario.setAlteracaoSenhaCodigoExpiracao(null);
         usuarioRepository.save(usuario);
     }
 
@@ -394,6 +437,62 @@ public class UsuarioService {
         } catch (IllegalArgumentException e) {
             return null;
         }
+    }
+
+    /**
+     * Cria ou atualiza usuário após validação do {@code id_token} Google no {@link AuthService}.
+     */
+    public Usuario sincronizarLoginGoogle(String googleSub, String emailRaw, String nomeRaw, boolean allowAutoRegister) {
+        if (googleSub == null || googleSub.isBlank()) {
+            throw new IllegalArgumentException("Identificador Google inválido");
+        }
+        String email = emailRaw.trim().toLowerCase();
+        if (email.isEmpty()) {
+            throw new IllegalArgumentException("E-mail inválido");
+        }
+        String nome = (nomeRaw != null && !nomeRaw.isBlank()) ? nomeRaw.trim() : email;
+        if (nome.length() > 100) {
+            nome = nome.substring(0, 100);
+        }
+
+        Optional<Usuario> byGoogle = usuarioRepository.findByGoogleSub(googleSub);
+        if (byGoogle.isPresent()) {
+            Usuario u = byGoogle.get();
+            if (!u.isAtivo()) {
+                throw new BadCredentialsException("Usuário inativo");
+            }
+            return u;
+        }
+
+        Optional<Usuario> byEmail = usuarioRepository.findByEmail(email);
+        if (byEmail.isPresent()) {
+            Usuario u = byEmail.get();
+            if (!u.isAtivo()) {
+                throw new BadCredentialsException("Usuário inativo");
+            }
+            if (u.getGoogleSub() != null && !u.getGoogleSub().equals(googleSub)) {
+                throw new BadCredentialsException("Este e-mail já está associado a outra conta Google.");
+            }
+            u.setGoogleSub(googleSub);
+            return usuarioRepository.save(u);
+        }
+
+        if (!allowAutoRegister) {
+            throw new BadCredentialsException("Não há conta com este e-mail. Solicite acesso ao administrador.");
+        }
+
+        String senhaPlaceholder = passwordEncoder.encode(UUID.randomUUID() + googleSub);
+        Usuario novo = Usuario.builder()
+                .nome(nome)
+                .email(email)
+                .senha(senhaPlaceholder)
+                .googleSub(googleSub)
+                .role(Usuario.Role.CLIENTE)
+                .status(Usuario.StatusUsuario.ATIVO)
+                .build();
+        novo = usuarioRepository.save(novo);
+        criarPermissoesPadrao(novo);
+        return usuarioRepository.save(novo);
     }
 
     /**

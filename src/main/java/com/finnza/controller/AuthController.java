@@ -1,6 +1,7 @@
 package com.finnza.controller;
 
 import com.finnza.dto.request.ForgotPasswordRequest;
+import com.finnza.dto.request.GoogleLoginRequest;
 import com.finnza.dto.request.LoginRequest;
 import com.finnza.dto.request.ResetPasswordRequest;
 import com.finnza.dto.response.LoginResponse;
@@ -28,6 +29,14 @@ public class AuthController {
     public ResponseEntity<LoginResponse> login(@Valid @RequestBody LoginRequest request) {
         LoginResponse response = authService.login(request);
         return ResponseEntity.ok(response);
+    }
+
+    /**
+     * Login com Google (corpo: {@code { "idToken": "<JWT do GSI>" }}).
+     */
+    @PostMapping("/google")
+    public ResponseEntity<LoginResponse> loginGoogle(@Valid @RequestBody GoogleLoginRequest request) {
+        return ResponseEntity.ok(authService.loginComGoogle(request));
     }
 
     /**

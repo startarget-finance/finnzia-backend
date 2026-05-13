@@ -155,6 +155,15 @@ public class UsuarioController {
     }
 
     /**
+     * Envia código por e-mail para confirmar alteração de senha (Meu perfil).
+     */
+    @PostMapping("/me/senha/solicitar-codigo")
+    public ResponseEntity<Void> solicitarCodigoAlteracaoSenha() {
+        usuarioService.solicitarCodigoAlteracaoSenha();
+        return ResponseEntity.ok().build();
+    }
+
+    /**
      * Altera a senha do usuário logado
      */
     @PutMapping("/me/senha")

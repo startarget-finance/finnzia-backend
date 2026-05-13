@@ -16,8 +16,14 @@ import lombok.NoArgsConstructor;
 @AllArgsConstructor
 public class ResetPasswordRequest {
 
-    @NotBlank(message = "Token é obrigatório")
+    /** Link do e-mail (UUID). */
     private String token;
+
+    /** E-mail do usuário (obrigatório junto com {@code codigo} se não usar token). */
+    private String email;
+
+    /** Código de 6 dígitos enviado por e-mail. */
+    private String codigo;
 
     @NotBlank(message = "Nova senha é obrigatória")
     @Size(min = 6, message = "Nova senha deve ter no mínimo 6 caracteres")

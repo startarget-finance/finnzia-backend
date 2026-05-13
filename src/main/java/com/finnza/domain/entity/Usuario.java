@@ -86,6 +86,21 @@ public class Usuario {
     @Column(name = "token_reset_senha_expiracao")
     private LocalDateTime tokenResetSenhaExpiracao;
 
+    /** Subject do Google OAuth; unicidade garantida por índice no Flyway (V016). */
+    @Column(name = "google_sub", length = 255)
+    private String googleSub;
+
+    /** BCrypt do código numérico (6 dígitos) enviado por e-mail na recuperação de senha. */
+    @Column(name = "reset_senha_codigo_hash", length = 255)
+    private String resetSenhaCodigoHash;
+
+    /** BCrypt do código de 6 dígitos para alterar senha estando logado (Meu perfil). */
+    @Column(name = "alteracao_senha_codigo_hash", length = 255)
+    private String alteracaoSenhaCodigoHash;
+
+    @Column(name = "alteracao_senha_codigo_expiracao")
+    private LocalDateTime alteracaoSenhaCodigoExpiracao;
+
     @Column(name = "omie_app_key", length = 100)
     private String omieAppKey;
 

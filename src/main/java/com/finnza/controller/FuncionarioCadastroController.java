@@ -28,7 +28,7 @@ public class FuncionarioCadastroController {
     private final FuncionarioCadastroService service;
 
     @GetMapping
-    @PreAuthorize("hasPermission(null, 'FLUXO_CAIXA')")
+    @PreAuthorize("hasPermission(null, 'FLUXO_CAIXA') or hasPermission(null, 'MOVIMENTACOES')")
     public ResponseEntity<?> listar(
             @RequestParam(value = "q", required = false) String q,
             @RequestParam(value = "idEmpresa", required = false) Integer idEmpresa,
@@ -48,7 +48,7 @@ public class FuncionarioCadastroController {
     }
 
     @GetMapping("/{id}")
-    @PreAuthorize("hasPermission(null, 'FLUXO_CAIXA')")
+    @PreAuthorize("hasPermission(null, 'FLUXO_CAIXA') or hasPermission(null, 'MOVIMENTACOES')")
     public ResponseEntity<?> buscar(@PathVariable Long id) {
         try {
             return ResponseEntity.ok(service.buscar(emailAutenticado(), id));

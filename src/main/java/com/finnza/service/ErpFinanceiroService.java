@@ -12,6 +12,12 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
@@ -40,10 +46,180 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class ErpFinanceiroService {
 
+    private static final ObjectMapper METADATA_JSON_MAPPER = new ObjectMapper();
+
     private final MovimentacaoFinanceiraRepository movimentacaoRepo;
     private final CategoriaFinanceiraEmpresaRepository categoriaFinanceiraRepo;
     private final DashboardKpiService dashboardKpiService;
 
+    private static final int RECORRENCIA_MAX_PARCELAS = 120;
+
+    /**
+     * Remove {@code conteudoBase64} de cada item em {@code anexos} para não duplicar o payload em todas as parcelas.
+     */
+    private static String metadataJsonSemBinariosAnexos(String metadataJson) {
+        if (metadataJson == null || metadataJson.isBlank()) {
+            return null;
+        }
+        try {
+            JsonNode root = METADATA_JSON_MAPPER.readTree(metadataJson);
+            if (!root.isObject()) {
+                return metadataJson;
+            }
+            ObjectNode obj = (ObjectNode) root;
+            JsonNode arr = obj.get("anexos");
+            if (arr != null && arr.isArray()) {
+                ArrayNode copy = METADATA_JSON_MAPPER.createArrayNode();
+                for (JsonNode a : arr) {
+                    if (a != null && a.isObject()) {
+                        ObjectNode one = (ObjectNode) a.deepCopy();
+                        one.remove("conteudoBase64");
+                        copy.add(one);
+                    } else {
+                        copy.add(a);
+                    }
+                }
+                obj.set("anexos", copy);
+            }
+            return METADATA_JSON_MAPPER.writeValueAsString(obj);
+        } catch (Exception e) {
+            return metadataJson;
+        }
+    }
+
+    private static String trimMetadataJson(String metadataJson) {
+        if (metadataJson == null || metadataJson.isBlank()) {
+            return null;
+        }
+        String t = metadataJson.trim();
+        if (t.length() > 4_000_000) {
+            throw new IllegalArgumentException("Metadados (metadataJson) excedem o tamanho máximo permitido.");
+        }
+        return t;
+    }
+
+    /**
+     * Frequências aceitas (case-insensitive): SEMANAL, QUINZENAL, MENSAL, BIMESTRAL, TRIMESTRAL, SEMESTRAL, ANUAL.
+     * NENHUMA/NONE ou null = lançamento único.
+     */
+    public static String normalizarFrequenciaRecorrencia(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return "NENHUMA";
+        }
+        String u = raw.trim().toUpperCase().replace('-', '_');
+        return switch (u) {
+            case "SEMANAL", "QUINZENAL", "MENSAL", "BIMESTRAL", "TRIMESTRAL", "SEMESTRAL", "ANUAL" -> u;
+            case "NONE", "NENHUMA", "" -> "NENHUMA";
+            default -> throw new IllegalArgumentException("Frequência de recorrência inválida: " + raw);
+        };
+    }
+
+    private static String resolverNomeTipoMovimentacao(Boolean debito, String tipoMovimentoDespesa) {
+        if (!Boolean.TRUE.equals(debito)) {
+            return "Receita";
+        }
+        if (tipoMovimentoDespesa == null || tipoMovimentoDespesa.isBlank()) {
+            return "Despesa";
+        }
+        String u = tipoMovimentoDespesa.trim().toUpperCase()
+                .replace('Á', 'A')
+                .replace('É', 'E')
+                .replace('Í', 'I')
+                .replace('Ó', 'O')
+                .replace('Ú', 'U');
+        return switch (u) {
+            case "FORNECEDOR" -> "Despesa com fornecedor";
+            case "FUNCIONARIO" -> "Despesa com funcionário";
+            case "IMPOSTOS", "IMPOSTO" -> "Despesa (impostos)";
+            case "TRANSFERENCIA", "TRANSFERÊNCIA" -> "Transferência entre contas";
+            default -> "Despesa";
+        };
+    }
+
+    private static LocalDate avancarRecorrencia(LocalDate base, String frequenciaNormalizada, int indice) {
+        if (indice <= 0) {
+            return base;
+        }
+        return switch (frequenciaNormalizada) {
+            case "SEMANAL" -> base.plusWeeks(indice);
+            case "QUINZENAL" -> base.plusWeeks(2L * indice);
+            case "MENSAL" -> base.plusMonths(indice);
+            case "BIMESTRAL" -> base.plusMonths(2L * indice);
+            case "TRIMESTRAL" -> base.plusMonths(3L * indice);
+            case "SEMESTRAL" -> base.plusMonths(6L * indice);
+            case "ANUAL" -> base.plusYears(indice);
+            default -> base;
+        };
+    }
+
+    private MovimentacaoFinanceira novaMovimentacaoManualEntity(
+            Integer idEmpresa,
+            Boolean debito,
+            LocalDate dataVencimento,
+            LocalDate dataCompetencia,
+            LocalDate dataQuitacao,
+            BigDecimal valor,
+            String nome,
+            String observacao,
+            String nomeCategoriaFinanceira,
+            String nomeContaFinanceira,
+            String nomeClienteFornecedor,
+            int numeroParcela,
+            int quantidadeParcela,
+            String nomeFormaPagamento,
+            String tipoMovimentoDespesa,
+            String departamento,
+            String rateioJson,
+            Long idFuncionario,
+            String metadataJson
+    ) {
+        String contaTrim = nomeContaFinanceira == null || nomeContaFinanceira.isBlank()
+                ? null
+                : nomeContaFinanceira.trim();
+        String formaTrim = nomeFormaPagamento == null || nomeFormaPagamento.isBlank()
+                ? null
+                : nomeFormaPagamento.trim();
+        String deptTrim = departamento == null || departamento.isBlank() ? null : departamento.trim();
+        String rateioTrim = rateioJson == null || rateioJson.isBlank() ? null : rateioJson.trim();
+        String metaTrim = trimMetadataJson(metadataJson);
+        return MovimentacaoFinanceira.builder()
+                .idMovimentacao("manual:" + UUID.randomUUID().toString().replace("-", ""))
+                .idEmpresa(idEmpresa)
+                .debito(Boolean.TRUE.equals(debito))
+                .dataVencimento(dataVencimento)
+                .dataCompetencia(dataCompetencia != null ? dataCompetencia : dataVencimento)
+                .dataQuitacao(dataQuitacao)
+                .dataConciliacao(null)
+                .valor(valor)
+                .formaPagamento(null)
+                .nomeFormaPagamento(formaTrim)
+                .tipoMovimentacao(null)
+                .nomeTipoMovimentacao(resolverNomeTipoMovimentacao(debito, tipoMovimentoDespesa))
+                .nome(nome)
+                .observacao(observacao)
+                .numeroParcela(numeroParcela)
+                .quantidadeParcela(quantidadeParcela)
+                .idCategoriaFinanceira(null)
+                .nomeCategoriaFinanceira(nomeCategoriaFinanceira)
+                .idContaFinanceira(null)
+                .nomeContaFinanceira(contaTrim)
+                .nomeEmpresa("Empresa " + idEmpresa)
+                .idCliente(null)
+                .idFornecedor(null)
+                .nomeClienteFornecedor(nomeClienteFornecedor)
+                .departamento(deptTrim)
+                .rateioJson(rateioTrim)
+                .metadataJson(metaTrim)
+                .idFuncionario(idFuncionario)
+                .statusPagamento(dataQuitacao != null ? "pago" : "pendente")
+                .dadosRaw(null)
+                .sincronizadoEm(LocalDateTime.now())
+                .ofxImportacaoId(null)
+                .ofxAprovado(true)
+                .build();
+    }
+
+    /** Compatível com chamadas antigas (sem forma/tipo de despesa nem metadados BC). */
     public Map<String, Object> criarMovimentacaoManual(
             Integer idEmpresa,
             Boolean debito,
@@ -57,40 +233,176 @@ public class ErpFinanceiroService {
             String nomeContaFinanceira,
             String nomeClienteFornecedor
     ) {
-        MovimentacaoFinanceira mov = MovimentacaoFinanceira.builder()
-                .idMovimentacao("manual:" + UUID.randomUUID().toString().replace("-", ""))
-                .idEmpresa(idEmpresa)
-                .debito(Boolean.TRUE.equals(debito))
-                .dataVencimento(dataVencimento)
-                .dataCompetencia(dataCompetencia != null ? dataCompetencia : dataVencimento)
-                .dataQuitacao(dataQuitacao)
-                .dataConciliacao(null)
-                .valor(valor)
-                .formaPagamento(null)
-                .nomeFormaPagamento(null)
-                .tipoMovimentacao(null)
-                .nomeTipoMovimentacao(Boolean.TRUE.equals(debito) ? "Despesa" : "Receita")
-                .nome(nome)
-                .observacao(observacao)
-                .numeroParcela(1)
-                .quantidadeParcela(1)
-                .idCategoriaFinanceira(null)
-                .nomeCategoriaFinanceira(nomeCategoriaFinanceira)
-                .idContaFinanceira(null)
-                .nomeContaFinanceira(nomeContaFinanceira)
-                .nomeEmpresa("Empresa " + idEmpresa)
-                .idCliente(null)
-                .idFornecedor(null)
-                .nomeClienteFornecedor(nomeClienteFornecedor)
-                .statusPagamento(dataQuitacao != null ? "pago" : "pendente")
-                .dadosRaw(null)
-                .sincronizadoEm(LocalDateTime.now())
-                .ofxImportacaoId(null)
-                .ofxAprovado(true)
-                .build();
+        return criarMovimentacaoManual(
+                idEmpresa,
+                debito,
+                dataVencimento,
+                dataCompetencia,
+                dataQuitacao,
+                valor,
+                nome,
+                observacao,
+                nomeCategoriaFinanceira,
+                nomeContaFinanceira,
+                nomeClienteFornecedor,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null
+        );
+    }
 
+    /** Compatível com chamadas sem departamento / rateio / funcionário. */
+    public Map<String, Object> criarMovimentacaoManual(
+            Integer idEmpresa,
+            Boolean debito,
+            LocalDate dataVencimento,
+            LocalDate dataCompetencia,
+            LocalDate dataQuitacao,
+            BigDecimal valor,
+            String nome,
+            String observacao,
+            String nomeCategoriaFinanceira,
+            String nomeContaFinanceira,
+            String nomeClienteFornecedor,
+            String nomeFormaPagamento,
+            String tipoMovimentoDespesa
+    ) {
+        return criarMovimentacaoManual(
+                idEmpresa,
+                debito,
+                dataVencimento,
+                dataCompetencia,
+                dataQuitacao,
+                valor,
+                nome,
+                observacao,
+                nomeCategoriaFinanceira,
+                nomeContaFinanceira,
+                nomeClienteFornecedor,
+                nomeFormaPagamento,
+                tipoMovimentoDespesa,
+                null,
+                null,
+                null,
+                null
+        );
+    }
+
+    public Map<String, Object> criarMovimentacaoManual(
+            Integer idEmpresa,
+            Boolean debito,
+            LocalDate dataVencimento,
+            LocalDate dataCompetencia,
+            LocalDate dataQuitacao,
+            BigDecimal valor,
+            String nome,
+            String observacao,
+            String nomeCategoriaFinanceira,
+            String nomeContaFinanceira,
+            String nomeClienteFornecedor,
+            String nomeFormaPagamento,
+            String tipoMovimentoDespesa,
+            String departamento,
+            String rateioJson,
+            Long idFuncionario,
+            String metadataJson
+    ) {
+        MovimentacaoFinanceira mov = novaMovimentacaoManualEntity(
+                idEmpresa,
+                debito,
+                dataVencimento,
+                dataCompetencia,
+                dataQuitacao,
+                valor,
+                nome,
+                observacao,
+                nomeCategoriaFinanceira,
+                nomeContaFinanceira,
+                nomeClienteFornecedor,
+                1,
+                1,
+                nomeFormaPagamento,
+                tipoMovimentoDespesa,
+                departamento,
+                rateioJson,
+                idFuncionario,
+                metadataJson
+        );
         MovimentacaoFinanceira saved = movimentacaoRepo.save(mov);
         return entityToMap(saved);
+    }
+
+    /**
+     * Cria N lançamentos idênticos (valor, categoria, parceiro) com vencimento e competência avançados pela frequência.
+     */
+    @Transactional
+    public List<Map<String, Object>> criarMovimentacoesRecorrentes(
+            Integer idEmpresa,
+            Boolean debito,
+            LocalDate dataVencimento0,
+            LocalDate dataCompetencia0,
+            BigDecimal valor,
+            String nome,
+            String observacao,
+            String nomeCategoriaFinanceira,
+            String nomeContaFinanceira,
+            String nomeClienteFornecedor,
+            String nomeFormaPagamento,
+            String tipoMovimentoDespesa,
+            String departamento,
+            String rateioJson,
+            Long idFuncionario,
+            String metadataJson,
+            String frequenciaNormalizada,
+            int totalParcelas
+    ) {
+        if (totalParcelas < 2) {
+            throw new IllegalArgumentException("Recorrência exige pelo menos 2 parcelas.");
+        }
+        if (totalParcelas > RECORRENCIA_MAX_PARCELAS) {
+            throw new IllegalArgumentException("Máximo de " + RECORRENCIA_MAX_PARCELAS + " parcelas por série.");
+        }
+        if ("NENHUMA".equals(frequenciaNormalizada)) {
+            throw new IllegalArgumentException("Informe uma frequência de recorrência válida.");
+        }
+        String metaPrimeira = trimMetadataJson(metadataJson);
+        String metaDemais = metadataJsonSemBinariosAnexos(metaPrimeira);
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (int i = 0; i < totalParcelas; i++) {
+            LocalDate v = avancarRecorrencia(dataVencimento0, frequenciaNormalizada, i);
+            LocalDate c = avancarRecorrencia(
+                    dataCompetencia0 != null ? dataCompetencia0 : dataVencimento0,
+                    frequenciaNormalizada,
+                    i
+            );
+            String metaParcela = (i == 0) ? metaPrimeira : metaDemais;
+            MovimentacaoFinanceira mov = novaMovimentacaoManualEntity(
+                    idEmpresa,
+                    debito,
+                    v,
+                    c,
+                    null,
+                    valor,
+                    nome,
+                    observacao,
+                    nomeCategoriaFinanceira,
+                    nomeContaFinanceira,
+                    nomeClienteFornecedor,
+                    i + 1,
+                    totalParcelas,
+                    nomeFormaPagamento,
+                    tipoMovimentoDespesa,
+                    departamento,
+                    rateioJson,
+                    idFuncionario,
+                    metaParcela
+            );
+            out.add(entityToMap(movimentacaoRepo.save(mov)));
+        }
+        return out;
     }
 
     /**
@@ -108,7 +420,13 @@ public class ErpFinanceiroService {
             String observacao,
             String nomeCategoriaFinanceira,
             String nomeContaFinanceira,
-            String nomeClienteFornecedor
+            String nomeClienteFornecedor,
+            String nomeFormaPagamento,
+            String tipoMovimentoDespesa,
+            String departamento,
+            String rateioJson,
+            Long idFuncionario,
+            String metadataJson
     ) {
         MovimentacaoFinanceira mov = movimentacaoRepo
                 .findByIdMovimentacaoAndIdEmpresa(idMovimentacao, idEmpresa)
@@ -119,6 +437,11 @@ public class ErpFinanceiroService {
         String contaTrim = nomeContaFinanceira == null || nomeContaFinanceira.isBlank()
                 ? null
                 : nomeContaFinanceira.trim();
+        String formaTrim = nomeFormaPagamento == null || nomeFormaPagamento.isBlank()
+                ? null
+                : nomeFormaPagamento.trim();
+        String deptTrim = departamento == null || departamento.isBlank() ? null : departamento.trim();
+        String rateioTrim = rateioJson == null || rateioJson.isBlank() ? null : rateioJson.trim();
         mov.setDebito(Boolean.TRUE.equals(debito));
         mov.setDataVencimento(dataVencimento);
         mov.setDataCompetencia(dataCompetencia != null ? dataCompetencia : dataVencimento);
@@ -129,7 +452,14 @@ public class ErpFinanceiroService {
         mov.setNomeCategoriaFinanceira(nomeCategoriaFinanceira);
         mov.setNomeContaFinanceira(contaTrim);
         mov.setNomeClienteFornecedor(nomeClienteFornecedor);
-        mov.setNomeTipoMovimentacao(Boolean.TRUE.equals(debito) ? "Despesa" : "Receita");
+        mov.setNomeFormaPagamento(formaTrim);
+        mov.setNomeTipoMovimentacao(resolverNomeTipoMovimentacao(debito, tipoMovimentoDespesa));
+        mov.setDepartamento(deptTrim);
+        mov.setRateioJson(rateioTrim);
+        if (metadataJson != null) {
+            mov.setMetadataJson(trimMetadataJson(metadataJson));
+        }
+        mov.setIdFuncionario(idFuncionario);
         mov.setStatusPagamento(dataQuitacao != null ? "pago" : "pendente");
         mov.setSincronizadoEm(LocalDateTime.now());
         MovimentacaoFinanceira saved = movimentacaoRepo.save(mov);
@@ -623,6 +953,10 @@ public class ErpFinanceiroService {
         map.put("IdCliente", m.getIdCliente());
         map.put("IdFornecedor", m.getIdFornecedor());
         map.put("NomeClienteFornecedor", m.getNomeClienteFornecedor());
+        map.put("Departamento", m.getDepartamento());
+        map.put("RateioJson", m.getRateioJson());
+        map.put("MetadataJson", m.getMetadataJson());
+        map.put("IdFuncionario", m.getIdFuncionario());
         return map;
     }
 }

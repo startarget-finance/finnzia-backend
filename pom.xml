@@ -68,6 +68,24 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-security</artifactId>
         </dependency>
+
+        <!-- E-mail (SMTP Gmail / Google Workspace — recuperação de senha) -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-mail</artifactId>
+        </dependency>
+        <!-- Jakarta Mail (jakarta.mail.internet.*) — explícito para classpath de compilação no IDE -->
+        <dependency>
+            <groupId>org.eclipse.angus</groupId>
+            <artifactId>jakarta.mail</artifactId>
+        </dependency>
+
+        <!-- Verificação do id_token do Google (Sign in with Google) -->
+        <dependency>
+            <groupId>com.google.api-client</groupId>
+            <artifactId>google-api-client</artifactId>
+            <version>2.7.2</version>
+        </dependency>
         
         <!-- PostgreSQL Driver -->
         <dependency>

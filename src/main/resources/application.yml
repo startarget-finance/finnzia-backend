@@ -1,0 +1,15 @@
+# Configuração base (URL/usuário do banco costumam vir do IntelliJ ou variáveis de ambiente).
+spring:
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+  jpa:
+    hibernate:
+      # Padrão "update": ao subir, o Hibernate alinha colunas/tabelas com as @Entity (útil em dev).
+      # Em produção, prefira "validate" e deixe o schema só para o Flyway:
+      #   SPRING_JPA_HIBERNATE_DDL_AUTO=validate
+      ddl-auto: ${SPRING_JPA_HIBERNATE_DDL_AUTO:update}
+
+server:
+  tomcat:
+    max-http-form-post-size: 32MB

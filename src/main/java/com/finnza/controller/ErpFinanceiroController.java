@@ -48,7 +48,21 @@ public class ErpFinanceiroController {
             String observacao,
             String nomeCategoriaFinanceira,
             String nomeContaFinanceira,
-            String nomeClienteFornecedor
+            String nomeClienteFornecedor,
+            /** Ex.: SEMANAL, MENSAL, TRIMESTRAL. Null ou NENHUMA = lançamento único. */
+            String recorrenciaFrequencia,
+            /** Total de parcelas da série (inclui a primeira). Null ou 1 = um único lançamento. */
+            Integer recorrenciaQuantidade,
+            /** Ex.: Dinheiro, PIX. Opcional. */
+            String nomeFormaPagamento,
+            /** FORNECEDOR | FUNCIONARIO | IMPOSTOS | TRANSFERENCIA — só despesa; opcional. */
+            String tipoMovimentoDespesa,
+            String departamento,
+            /** JSON array de rateio, ex.: [{"categoria":"X","percentual":50}]. */
+            String rateioJson,
+            Long idFuncionario,
+            /** JSON com anexos (Base64), contatos, faturamento, fluxo, etc. */
+            String metadataJson
     ) {}
 
     private final ErpFinanceiroService erpFinanceiroService;
@@ -294,6 +308,12 @@ public class ErpFinanceiroController {
                     "mensagem", "Data de vencimento é obrigatória"
             ));
         }
+        if (request.metadataJson() != null && request.metadataJson().length() > 4_000_000) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "erro", true,
+                    "mensagem", "Campo metadataJson excede o tamanho máximo permitido."
+            ));
+        }
 
         try {
             LocalDate dataVencimento = LocalDate.parse(request.dataVencimento());
@@ -303,6 +323,77 @@ public class ErpFinanceiroController {
             LocalDate dataQuitacao = request.dataQuitacao() == null || request.dataQuitacao().isBlank()
                     ? null
                     : LocalDate.parse(request.dataQuitacao());
+
+            String freqNorm = ErpFinanceiroService.normalizarFrequenciaRecorrencia(request.recorrenciaFrequencia());
+            int parcelas = request.recorrenciaQuantidade() == null ? 1 : request.recorrenciaQuantidade();
+            if (parcelas < 1) {
+                parcelas = 1;
+            }
+            if (parcelas >= 2 && "NENHUMA".equals(freqNorm)) {
+                return ResponseEntity.badRequest().body(Map.of(
+                        "erro", true,
+                        "mensagem", "Para criar várias parcelas, informe a frequência da recorrência."
+                ));
+            }
+            if (parcelas >= 2 && dataQuitacao != null) {
+                return ResponseEntity.badRequest().body(Map.of(
+                        "erro", true,
+                        "mensagem", "Recorrência não pode ser usada com lançamento já quitado no cadastro."
+                ));
+            }
+
+            boolean serie = parcelas >= 2 && !"NENHUMA".equals(freqNorm);
+
+            if (serie) {
+                List<Map<String, Object>> lista = erpFinanceiroService.criarMovimentacoesRecorrentes(
+                        idEmpresa,
+                        request.debito(),
+                        dataVencimento,
+                        dataCompetencia,
+                        request.valor(),
+                        request.nome().trim(),
+                        request.observacao(),
+                        request.nomeCategoriaFinanceira().trim(),
+                        request.nomeContaFinanceira(),
+                        request.nomeClienteFornecedor(),
+                        request.nomeFormaPagamento(),
+                        request.tipoMovimentoDespesa(),
+                        request.departamento(),
+                        request.rateioJson(),
+                        request.idFuncionario(),
+                        request.metadataJson(),
+                        freqNorm,
+                        parcelas
+                );
+                for (Map<String, Object> row : lista) {
+                    String idOrigem = String.valueOf(row.getOrDefault("IdMovimentacaoFinanceiraParcela", ""));
+                    LocalDate dv = LocalDate.parse(String.valueOf(row.get("DataVencimento")));
+                    LocalDate dc = row.get("DataCompetencia") != null
+                            ? LocalDate.parse(String.valueOf(row.get("DataCompetencia")))
+                            : dv;
+                    movimentacaoHistoricoService.registrarCriacao(
+                            idEmpresa,
+                            idOrigem,
+                            request.debito(),
+                            dv,
+                            dc,
+                            null,
+                            request.valor(),
+                            request.nome().trim(),
+                            request.observacao(),
+                            request.nomeCategoriaFinanceira().trim(),
+                            request.nomeContaFinanceira(),
+                            request.nomeClienteFornecedor()
+                    );
+                }
+                Map<String, Object> body = new LinkedHashMap<>();
+                body.put("erro", false);
+                body.put("mensagem", lista.size() + " parcelas cadastradas com sucesso.");
+                body.put("movimentacoes", lista);
+                body.put("movimentacao", lista.isEmpty() ? null : lista.get(0));
+                body.put("totalCadastrados", lista.size());
+                return ResponseEntity.ok(body);
+            }
 
             Map<String, Object> novaMov = erpFinanceiroService.criarMovimentacaoManual(
                     idEmpresa,
@@ -315,7 +406,13 @@ public class ErpFinanceiroController {
                     request.observacao(),
                     request.nomeCategoriaFinanceira().trim(),
                     request.nomeContaFinanceira(),
-                    request.nomeClienteFornecedor()
+                    request.nomeClienteFornecedor(),
+                    request.nomeFormaPagamento(),
+                    request.tipoMovimentoDespesa(),
+                    request.departamento(),
+                    request.rateioJson(),
+                    request.idFuncionario(),
+                    request.metadataJson()
             );
             String idOrigem = String.valueOf(novaMov.getOrDefault("IdMovimentacaoFinanceiraParcela", ""));
             movimentacaoHistoricoService.registrarCriacao(
@@ -402,6 +499,12 @@ public class ErpFinanceiroController {
                     "mensagem", "Data de vencimento é obrigatória"
             ));
         }
+        if (request.metadataJson() != null && request.metadataJson().length() > 4_000_000) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "erro", true,
+                    "mensagem", "Campo metadataJson excede o tamanho máximo permitido."
+            ));
+        }
 
         try {
             var movAntes = erpFinanceiroService.buscarMovimentacao(idEmpresa, idMovimentacao).orElse(null);
@@ -435,7 +538,13 @@ public class ErpFinanceiroController {
                     request.observacao(),
                     request.nomeCategoriaFinanceira().trim(),
                     request.nomeContaFinanceira(),
-                    request.nomeClienteFornecedor()
+                    request.nomeClienteFornecedor(),
+                    request.nomeFormaPagamento(),
+                    request.tipoMovimentoDespesa(),
+                    request.departamento(),
+                    request.rateioJson(),
+                    request.idFuncionario(),
+                    request.metadataJson()
             );
             if (movAntes != null) {
                 movimentacaoHistoricoService.registrarEdicao(

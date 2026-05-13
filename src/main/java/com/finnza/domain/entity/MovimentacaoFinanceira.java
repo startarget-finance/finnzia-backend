@@ -104,6 +104,23 @@ public class MovimentacaoFinanceira {
     @Column(name = "nome_cliente_fornecedor", length = 500)
     private String nomeClienteFornecedor;
 
+    @Column(name = "departamento", length = 200)
+    private String departamento;
+
+    /** JSON: lista de { "categoria": "...", "percentual": 40.5 } para rateio entre categorias. */
+    @Column(name = "rateio_json", columnDefinition = "TEXT")
+    private String rateioJson;
+
+    /**
+     * JSON do cadastro (anexos em Base64, contatos, faturamento, fluxo receita/despesa, etc.).
+     * Em séries com várias parcelas, a 1ª parcela pode conter binários; as demais são gravadas sem {@code conteudoBase64} nos anexos.
+     */
+    @Column(name = "metadata_json", columnDefinition = "TEXT")
+    private String metadataJson;
+
+    @Column(name = "id_funcionario")
+    private Long idFuncionario;
+
     /** "pendente" se ainda não quitado, "pago" se DataQuitacao preenchida */
     @Column(name = "status_pagamento", length = 20)
     private String statusPagamento;

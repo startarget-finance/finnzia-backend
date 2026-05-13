@@ -44,5 +44,8 @@ public interface UsuarioRepository extends JpaRepository<Usuario, Long>, JpaSpec
      */
     @Query("SELECT u FROM Usuario u WHERE u.tokenResetSenha = :token AND (u.deleted = false OR u.deleted IS NULL)")
     Optional<Usuario> findByTokenResetSenha(@Param("token") String token);
+
+    @Query("SELECT u FROM Usuario u WHERE u.googleSub = :googleSub AND (u.deleted = false OR u.deleted IS NULL)")
+    Optional<Usuario> findByGoogleSub(@Param("googleSub") String googleSub);
 }
 

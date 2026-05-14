@@ -172,6 +172,15 @@ public interface MovimentacaoFinanceiraRepository extends JpaRepository<Moviment
            """)
     List<Object[]> listarEmpresasDistinct();
 
+    /** IDs de empresa que já têm movimentação persistida (inclui linhas sem nome na movimentação). */
+    @Query("""
+           SELECT DISTINCT m.idEmpresa
+           FROM MovimentacaoFinanceira m
+           WHERE m.idEmpresa IS NOT NULL
+           ORDER BY m.idEmpresa
+           """)
+    List<Integer> findDistinctIdEmpresas();
+
     /**
      * Fluxo single-tenant: usa o primeiro ID de empresa disponível mesmo quando o nome estiver nulo.
      */

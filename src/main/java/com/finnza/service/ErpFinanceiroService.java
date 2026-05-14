@@ -5,6 +5,7 @@ import com.finnza.domain.entity.MovimentacaoFinanceira;
 import com.finnza.dto.response.DfcResponseDTO;
 import com.finnza.repository.CategoriaFinanceiraEmpresaRepository;
 import com.finnza.dto.response.ResumoFinanceiroDTO;
+import com.finnza.repository.EmpresaUsuarioRepository;
 import com.finnza.repository.MovimentacaoFinanceiraRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -50,6 +51,7 @@ public class ErpFinanceiroService {
 
     private final MovimentacaoFinanceiraRepository movimentacaoRepo;
     private final CategoriaFinanceiraEmpresaRepository categoriaFinanceiraRepo;
+    private final EmpresaUsuarioRepository empresaUsuarioRepository;
     private final DashboardKpiService dashboardKpiService;
 
     private static final int RECORRENCIA_MAX_PARCELAS = 120;
@@ -601,16 +603,45 @@ public class ErpFinanceiroService {
 
     /**
      * Lista empresas disponíveis no ERP (derivadas das movimentações persistidas).
-     * Formato compatível com o frontend existente: [{ "Id": 1, "Nome": "Empresa" }, ...]
+     * O nome exibido prioriza {@code empresa_usuario.nome_empresa} (cadastro local Postgres);
+     * só usa o nome gravado na movimentação como fallback.
+     * Formato compatível com o frontend existente: [{ "Id": 1, "Nome": "..." }, ...]
      */
     public Map<String, Object> listarEmpresas() {
-        List<Object[]> rows = movimentacaoRepo.listarEmpresasDistinct();
+        List<Integer> ids = movimentacaoRepo.findDistinctIdEmpresas();
+
+        Map<Integer, String> nomeCadastro = new HashMap<>();
+        for (Object[] row : empresaUsuarioRepository.findNomesEmpresaCadastroAtivos()) {
+            if (row == null || row.length < 2 || row[0] == null || row[1] == null) {
+                continue;
+            }
+            nomeCadastro.put((Integer) row[0], String.valueOf(row[1]).trim());
+        }
+
+        Map<Integer, String> nomeMovimentacao = new HashMap<>();
+        for (Object[] r : movimentacaoRepo.listarEmpresasDistinct()) {
+            if (r == null || r.length < 2 || r[0] == null) {
+                continue;
+            }
+            Integer id = (Integer) r[0];
+            String nm = r[1] != null ? String.valueOf(r[1]).trim() : "";
+            if (!nm.isEmpty()) {
+                nomeMovimentacao.put(id, nm);
+            }
+        }
 
         List<Map<String, Object>> empresas = new ArrayList<>();
-        for (Object[] r : rows) {
+        for (Integer id : ids) {
             Map<String, Object> emp = new LinkedHashMap<>();
-            emp.put("Id", (Integer) r[0]);
-            emp.put("Nome", (String) r[1]);
+            emp.put("Id", id);
+            String nome = nomeCadastro.get(id);
+            if (nome == null || nome.isBlank()) {
+                nome = nomeMovimentacao.get(id);
+            }
+            if (nome == null || nome.isBlank()) {
+                nome = "Empresa " + id;
+            }
+            emp.put("Nome", nome);
             empresas.add(emp);
         }
 

@@ -119,4 +119,18 @@ public interface EmpresaUsuarioRepository extends JpaRepository<EmpresaUsuario, 
 
     /** Qualquer vínculo ativo com esse idEmpresa (para exibir nome em cadastros internos). */
     Optional<EmpresaUsuario> findFirstByIdEmpresaAndAtivoTrueOrderByIdAsc(Integer idEmpresa);
+
+    /**
+     * Nome amigável por {@code id_empresa} vindo da tabela {@code empresa_usuario} (PostgreSQL).
+     * Usado para painel admin / listagens onde o nome na movimentação é só placeholder ("Empresa 1").
+     */
+    @Query("""
+           SELECT eu.idEmpresa, MAX(eu.nomeEmpresa)
+           FROM EmpresaUsuario eu
+           WHERE eu.ativo = true
+             AND eu.nomeEmpresa IS NOT NULL
+             AND eu.nomeEmpresa <> ''
+           GROUP BY eu.idEmpresa
+           """)
+    List<Object[]> findNomesEmpresaCadastroAtivos();
 }

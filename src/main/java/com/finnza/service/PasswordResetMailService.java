@@ -139,7 +139,13 @@ public class PasswordResetMailService {
                 + "Senha provisória: " + senhaProvisoria + "\n\n"
                 + "Acesse: " + loginUrl
                 + "\n\nAltere a senha após o primeiro acesso em Meu perfil.\n";
-        sendMime(recipientEmail, "Sua conta " + BRAND + " foi criada", plain, html, "convite novo usuário");
+        sendMime(
+                recipientEmail,
+                "Sua conta " + BRAND + " foi criada",
+                plain,
+                html,
+                "convite novo usuário",
+                false);
     }
 
     /**
@@ -164,14 +170,30 @@ public class PasswordResetMailService {
                 + ",\n\n"
                 + "Código para alterar sua senha (15 minutos): " + codigoSeisDigitos.trim()
                 + "\n\nInforme-o em Meu perfil junto com a senha atual e a nova senha.\n";
-        sendMime(recipientEmail, "Código para alterar senha — " + BRAND, plain, html, "código alteração senha");
+        sendMime(
+                recipientEmail,
+                "Código para alterar senha — " + BRAND,
+                plain,
+                html,
+                "código alteração senha",
+                true);
     }
 
     private boolean smtpReady() {
         return StringUtils.hasText(smtpUsername) && StringUtils.hasText(smtpPassword);
     }
 
-    private void sendMime(String to, String subject, String plain, String html, String logContext) {
+    /**
+     * @param swallowExceptions se true, só registra o erro (fluxos em que o e-mail é “melhor esforço”).
+     *        Se false, propaga para a transação de criação de usuário reverter e o cliente receber erro explícito.
+     */
+    private void sendMime(
+            String to,
+            String subject,
+            String plain,
+            String html,
+            String logContext,
+            boolean swallowExceptions) {
         try {
             MimeMessage message = javaMailSender.createMimeMessage();
             MimeMessageHelper helper = new MimeMessageHelper(message, true, "UTF-8");
@@ -183,6 +205,12 @@ public class PasswordResetMailService {
             log.info("E-mail ({}) enviado para {}", logContext, maskEmail(to));
         } catch (Exception e) {
             log.error("Falha ao enviar e-mail ({}) para {}", logContext, maskEmail(to), e);
+            if (!swallowExceptions) {
+                if (e instanceof RuntimeException re) {
+                    throw re;
+                }
+                throw new IllegalStateException("Falha ao enviar e-mail (" + logContext + ")", e);
+            }
         }
     }
 

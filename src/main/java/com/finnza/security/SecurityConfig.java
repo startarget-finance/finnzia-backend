@@ -93,6 +93,7 @@ public class SecurityConfig {
                 .requestMatchers("/api/public/**").permitAll()
                 .requestMatchers("/api/usuarios/primeiro-admin").permitAll()
                 .requestMatchers("/api/webhooks/asaas").permitAll() // Webhook do Asaas (sem autenticação)
+                .requestMatchers("/api/webhooks/pluggy").permitAll() // Webhook Pluggy (sem JWT)
                 .requestMatchers("/api/clint/**").permitAll() // Endpoint da Clint (sem autenticação)
                 .requestMatchers("/api/test/**").authenticated() // Endpoint de teste (requer autenticação)
                 .requestMatchers("/actuator/health").permitAll()

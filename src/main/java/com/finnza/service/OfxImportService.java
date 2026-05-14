@@ -418,6 +418,61 @@ public class OfxImportService {
         return out;
     }
 
+    /**
+     * Categoria e cliente/fornecedor no mesmo padrão do import OFX, usando descrição finzzia + categoria Pluggy.
+     */
+    public void aplicarClassificacaoOpenFinancePluggy(MovimentacaoFinanceira mov, Integer idEmpresa, String pluggyCategory) {
+        if (mov == null || idEmpresa == null || idEmpresa <= 0) {
+            return;
+        }
+        boolean debito = Boolean.TRUE.equals(mov.getDebito());
+        String memo = mov.getNome();
+        if (hasText(pluggyCategory)) {
+            if (!hasText(memo)) {
+                memo = pluggyCategory;
+            } else if (!memo.toLowerCase(Locale.ROOT).contains(pluggyCategory.toLowerCase(Locale.ROOT))) {
+                memo = memo + " | " + pluggyCategory;
+            }
+        }
+        if (!hasText(memo)) {
+            memo = debito ? "Despesa bancária" : "Receita bancária";
+        }
+        String payeeNome = mov.getNomeClienteFornecedor();
+        String parceiroExtraido = extrairNomeParceiro(memo, payeeNome);
+        ParceiroMatch parceiroMatch = resolverParceiroPorNome(idEmpresa, firstNonBlank(parceiroExtraido, payeeNome));
+
+        CategoriaClassifier despesaClassifier = new CategoriaClassifier(idEmpresa, true);
+        CategoriaClassifier receitaClassifier = new CategoriaClassifier(idEmpresa, false);
+        CategoriaClassifier classifier = debito ? despesaClassifier : receitaClassifier;
+        CategoriaMatch categoriaMatch = classifier.classificar(memo, payeeNome, parceiroMatch.nome());
+        CategoriaFinanceiraEmpresa categoriaOfx = categoriaMatch.categoria();
+
+        if (categoriaOfx != null) {
+            mov.setIdCategoriaFinanceira(Math.toIntExact(categoriaOfx.getId()));
+            mov.setNomeCategoriaFinanceira(categoriaOfx.getNome());
+        }
+
+        if (parceiroMatch.idFornecedor() != null) {
+            mov.setIdFornecedor(parceiroMatch.idFornecedor());
+            mov.setIdCliente(null);
+        } else if (parceiroMatch.idCliente() != null) {
+            mov.setIdCliente(parceiroMatch.idCliente());
+            mov.setIdFornecedor(null);
+        }
+
+        if (hasText(parceiroMatch.nome())) {
+            mov.setNomeClienteFornecedor(parceiroMatch.nome());
+        } else if (hasText(payeeNome)) {
+            mov.setNomeClienteFornecedor(payeeNome.trim());
+        }
+
+        String obsClass = montarObservacaoClassificacao(categoriaMatch);
+        if (hasText(obsClass)) {
+            String obs = mov.getObservacao();
+            mov.setObservacao(hasText(obs) ? obs + " | " + obsClass : obsClass);
+        }
+    }
+
     private String montarObservacaoClassificacao(CategoriaMatch categoriaMatch) {
         if (categoriaMatch == null || !hasText(categoriaMatch.origem())) {
             return null;

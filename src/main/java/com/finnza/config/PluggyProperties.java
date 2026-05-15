@@ -28,4 +28,16 @@ public class PluggyProperties {
      * Opcional: se vazio, o connect token não envia webhookUrl (pode configurar só no dashboard Pluggy).
      */
     private String webhookUrl = "";
+
+    /**
+     * {@code true} quando as credenciais são do ambiente <strong>Development/Sandbox</strong> no dashboard Pluggy
+     * (widget exibe “Aplicação demo”). Em produção use {@code false} e Client ID/Secret da aba <strong>Production</strong>.
+     */
+    private boolean sandboxMode = false;
+
+    /**
+     * Se {@code true}, o frontend passa {@code includeSandbox: true} ao Pluggy Connect (conector Sandbox na lista).
+     * Defina {@code PLUGGY_INCLUDE_SANDBOX=true} no Render — lido em runtime pelo {@code GET /api/pluggy/status}.
+     */
+    private boolean includeSandbox = false;
 }

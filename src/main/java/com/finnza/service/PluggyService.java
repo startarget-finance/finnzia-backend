@@ -27,7 +27,11 @@ public class PluggyService {
     private final PluggyConexaoRepository pluggyConexaoRepository;
 
     public PluggyStatusResponse status() {
-        return PluggyStatusResponse.builder().configured(isConfigured()).build();
+        return PluggyStatusResponse.builder()
+                .configured(isConfigured())
+                .sandboxMode(pluggyProperties.isSandboxMode())
+                .includeSandbox(pluggyProperties.isIncludeSandbox())
+                .build();
     }
 
     public boolean isConfigured() {

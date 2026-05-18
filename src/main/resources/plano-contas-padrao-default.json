@@ -1,0 +1,9 @@
+[
+  {"tipo":"receita","nome":"1. RECEITA OPERACIONAL TOTAL","children":[{"nome":"Vendas"}]},
+  {"tipo":"receita","nome":"ENTRADAS NÃO OPERACIONAIS","children":[{"nome":"Aporte Financeiro"},{"nome":"Juros Inadimplentes"},{"nome":"Aporte Sócios"},{"nome":"Rendimentos Financeiros"}]},
+  {"tipo":"despesa","nome":"2. CUSTOS VARIÁVEIS","children":[{"nome":"Comissões"},{"nome":"Devolução Cliente"},{"nome":"Taxas Cobranças"},{"nome":"Tributos - Simples Nacional"}]},
+  {"tipo":"despesa","nome":"3. DESPESAS OPERACIONAIS (FIXAS)","children":[{"nome":"Administrativas","children":[{"nome":"Adm - Advocacia"},{"nome":"Adm - Aluguel"},{"nome":"Adm - Certificado Digital"},{"nome":"Adm - Conselho"},{"nome":"Adm - Contabilidade"},{"nome":"Adm - Energia Elétrica"},{"nome":"Adm - IPTU"},{"nome":"Adm - Internet/Telefone"},{"nome":"Adm - Limpeza"},{"nome":"Adm - Sistemas"}]},{"nome":"Recursos Humanos","children":[{"nome":"Folha - Copa e Cozinha"},{"nome":"Folha - Honorários (PJ)"},{"nome":"Folha - INSS"},{"nome":"Folha - Pró-labore/Retirada Sócios"},{"nome":"Folha - Salários (CLT)"}]}]},
+  {"tipo":"despesa","nome":"4. DESPESAS ESTRATÉGICAS","children":[{"nome":"Cursos e Especializações"},{"nome":"Marketing e Publicidade"},{"nome":"Marketing e Publicidade - Google ADS"},{"nome":"Marketing e Publicidade - Meta ADS"}]},
+  {"tipo":"despesa","nome":"5. ATIVIDADES DE INVESTIMENTO/MANUTENÇÃO","children":[{"nome":"Móveis e Equipamentos"},{"nome":"Reformas e Manutenção"}]},
+  {"tipo":"despesa","nome":"6. ATIVIDADES FINANCEIRAS","children":[{"nome":"Despesas Bancárias"},{"nome":"Distribuição Lucro"},{"nome":"Juros e Multas"}]}
+]

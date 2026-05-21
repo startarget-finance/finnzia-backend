@@ -22,6 +22,7 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
 import java.time.format.DateTimeParseException;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -65,6 +66,12 @@ public class PluggySyncService {
         LocalDate ini = request != null && request.getDataInicio() != null ? request.getDataInicio() : fim.minusDays(90);
         if (ini.isAfter(fim)) {
             throw new IllegalArgumentException("dataInicio não pode ser posterior a dataFim");
+        }
+        long diasPeriodo = ChronoUnit.DAYS.between(ini, fim) + 1;
+        if (diasPeriodo > 90) {
+            throw new IllegalArgumentException(
+                    "Período máximo de 90 dias por sincronização (atual: " + diasPeriodo + " dias). "
+                            + "Reduza o intervalo entre data início e data fim ou sincronize em partes.");
         }
 
         Integer idConta = request != null ? request.getIdContaBancaria() : null;

@@ -36,6 +36,12 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class PluggySyncService {
 
+    /** Período máximo (dias corridos, inclusive) por requisição de sync. */
+    private static final int MAX_DIAS_SYNC = 90;
+
+    /** Máximo de páginas Pluggy por conta (500 tx/página) para não estourar timeout do host. */
+    private static final int MAX_PAGINAS_TRANSACOES_POR_CONTA = 12;
+
     private final PluggyApiClient pluggyApiClient;
     private final PluggyConexaoRepository pluggyConexaoRepository;
     private final UsuarioRepository usuarioRepository;
@@ -63,14 +69,17 @@ public class PluggySyncService {
                 .orElseThrow(() -> new IllegalArgumentException("Conexão Pluggy não encontrada"));
 
         LocalDate fim = request != null && request.getDataFim() != null ? request.getDataFim() : LocalDate.now();
-        LocalDate ini = request != null && request.getDataInicio() != null ? request.getDataInicio() : fim.minusDays(90);
+        // Últimos 90 dias inclusive: hoje e mais 89 para trás (minusDays(90) gerava 91 dias com a validação abaixo).
+        LocalDate ini = request != null && request.getDataInicio() != null
+                ? request.getDataInicio()
+                : fim.minusDays(MAX_DIAS_SYNC - 1L);
         if (ini.isAfter(fim)) {
             throw new IllegalArgumentException("dataInicio não pode ser posterior a dataFim");
         }
         long diasPeriodo = ChronoUnit.DAYS.between(ini, fim) + 1;
-        if (diasPeriodo > 90) {
+        if (diasPeriodo > MAX_DIAS_SYNC) {
             throw new IllegalArgumentException(
-                    "Período máximo de 90 dias por sincronização (atual: " + diasPeriodo + " dias). "
+                    "Período máximo de " + MAX_DIAS_SYNC + " dias por sincronização (atual: " + diasPeriodo + " dias). "
                             + "Reduza o intervalo entre data início e data fim ou sincronize em partes.");
         }
 
@@ -88,6 +97,7 @@ public class PluggySyncService {
 
         String from = ini.toString();
         String to = fim.toString();
+        log.info("Pluggy sync: item={} empresa={} período {} a {} ({} dias)", itemId, idEmpresa, from, to, diasPeriodo);
 
         List<MovimentacaoFinanceira> candidatos = new ArrayList<>();
         for (JsonNode acc : results) {
@@ -149,11 +159,7 @@ public class PluggySyncService {
         if (!novos.isEmpty()) {
             novos.forEach(m -> m.setOfxImportacaoId(importacao.getId()));
             movimentacaoRepo.saveAll(novos);
-            try {
-                ofxImportService.backfillDadosOfx(idEmpresa, Math.min(5000, Math.max(novos.size(), 50)));
-            } catch (Exception e) {
-                log.debug("Backfill pós-Pluggy opcional falhou", e);
-            }
+            // Classificação já aplicada em mapTransaction; backfill síncrono estourava timeout no Render.
         }
 
         return PluggySyncResponse.builder()
@@ -185,8 +191,13 @@ public class PluggySyncService {
                 break;
             }
             page++;
+            if (page >= MAX_PAGINAS_TRANSACOES_POR_CONTA) {
+                log.warn("Pluggy sync: limite de {} páginas na conta {} (período {} a {})",
+                        MAX_PAGINAS_TRANSACOES_POR_CONTA, accountId, from, to);
+                break;
+            }
             if (page > 10_000) {
-                log.warn("Pluggy sync: interrompido por limite de páginas na conta {}", accountId);
+                log.warn("Pluggy sync: interrompido por limite de segurança na conta {}", accountId);
                 break;
             }
         }

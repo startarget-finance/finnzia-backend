@@ -419,10 +419,42 @@ public class OfxImportService {
     }
 
     /**
+     * Classificadores carregados uma vez por sync Pluggy (evita milhares de SELECT de categorias).
+     */
+    public static final class PluggyClassificacaoContexto {
+        private final CategoriaClassifier despesaClassifier;
+        private final CategoriaClassifier receitaClassifier;
+
+        private PluggyClassificacaoContexto(Integer idEmpresa, OfxImportService service) {
+            this.despesaClassifier = service.new CategoriaClassifier(idEmpresa, true);
+            this.receitaClassifier = service.new CategoriaClassifier(idEmpresa, false);
+        }
+    }
+
+    public PluggyClassificacaoContexto criarContextoClassificacaoPluggy(Integer idEmpresa) {
+        if (idEmpresa == null || idEmpresa <= 0) {
+            throw new IllegalArgumentException("Empresa inválida para classificação Pluggy");
+        }
+        return new PluggyClassificacaoContexto(idEmpresa, this);
+    }
+
+    /**
      * Categoria e cliente/fornecedor no mesmo padrão do import OFX, usando descrição finzzia + categoria Pluggy.
      */
     public void aplicarClassificacaoOpenFinancePluggy(MovimentacaoFinanceira mov, Integer idEmpresa, String pluggyCategory) {
         if (mov == null || idEmpresa == null || idEmpresa <= 0) {
+            return;
+        }
+        aplicarClassificacaoOpenFinancePluggy(mov, idEmpresa, pluggyCategory, criarContextoClassificacaoPluggy(idEmpresa));
+    }
+
+    public void aplicarClassificacaoOpenFinancePluggy(
+            MovimentacaoFinanceira mov,
+            Integer idEmpresa,
+            String pluggyCategory,
+            PluggyClassificacaoContexto contexto
+    ) {
+        if (mov == null || idEmpresa == null || idEmpresa <= 0 || contexto == null) {
             return;
         }
         boolean debito = Boolean.TRUE.equals(mov.getDebito());
@@ -441,9 +473,7 @@ public class OfxImportService {
         String parceiroExtraido = extrairNomeParceiro(memo, payeeNome);
         ParceiroMatch parceiroMatch = resolverParceiroPorNome(idEmpresa, firstNonBlank(parceiroExtraido, payeeNome));
 
-        CategoriaClassifier despesaClassifier = new CategoriaClassifier(idEmpresa, true);
-        CategoriaClassifier receitaClassifier = new CategoriaClassifier(idEmpresa, false);
-        CategoriaClassifier classifier = debito ? despesaClassifier : receitaClassifier;
+        CategoriaClassifier classifier = debito ? contexto.despesaClassifier : contexto.receitaClassifier;
         CategoriaMatch categoriaMatch = classifier.classificar(memo, payeeNome, parceiroMatch.nome());
         CategoriaFinanceiraEmpresa categoriaOfx = categoriaMatch.categoria();
 
@@ -615,11 +645,12 @@ public class OfxImportService {
         }
 
         private CategoriaMatch classificar(String memo, String payee, String parceiroNome) {
-            String texto = normalize(String.join(" ", List.of(
-                    firstNonBlank(memo, ""),
-                    firstNonBlank(payee, ""),
-                    firstNonBlank(parceiroNome, "")
-            )));
+            // firstNonBlank(memo, "") pode retornar null ("" é blank); List.of não aceita null.
+            String texto = normalize(String.join(" ",
+                    coalesceBlank(memo),
+                    coalesceBlank(payee),
+                    coalesceBlank(parceiroNome)
+            ));
             if (!hasText(texto)) {
                 return new CategoriaMatch(fallbackCategoria, "fallback-sem-texto");
             }
@@ -712,6 +743,12 @@ public class OfxImportService {
             if (v != null && !v.isBlank()) return v.trim();
         }
         return null;
+    }
+
+    /** Evita null em APIs que não aceitam (ex.: {@link List#of}). */
+    private static String coalesceBlank(String... vals) {
+        String s = firstNonBlank(vals);
+        return s != null ? s : "";
     }
 
     private static String buildId(Integer idEmpresa, String fitId, LocalDate posted, BigDecimal valor, int idx) {

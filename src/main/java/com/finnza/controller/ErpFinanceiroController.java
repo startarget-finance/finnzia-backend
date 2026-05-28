@@ -4,6 +4,7 @@ import com.finnza.dto.response.DfcResponseDTO;
 import com.finnza.dto.response.ResumoFinanceiroDTO;
 import com.finnza.service.MovimentacaoHistoricoService;
 import com.finnza.service.ErpFinanceiroService;
+import com.finnza.service.MovimentacaoLancamentoImportService;
 import com.finnza.service.OfxImportService;
 import com.finnza.service.UsuarioEmpresaService;
 import lombok.RequiredArgsConstructor;
@@ -67,6 +68,7 @@ public class ErpFinanceiroController {
 
     private final ErpFinanceiroService erpFinanceiroService;
     private final MovimentacaoHistoricoService movimentacaoHistoricoService;
+    private final MovimentacaoLancamentoImportService movimentacaoLancamentoImportService;
     private final UsuarioEmpresaService usuarioEmpresaService;
     private final OfxImportService ofxImportService;
 
@@ -257,6 +259,39 @@ public class ErpFinanceiroController {
                         numeroDaPagina
                 )
         );
+    }
+
+    @GetMapping("/movimentacoes/{id}")
+    @PreAuthorize("hasPermission(null, 'MOVIMENTACOES')")
+    public ResponseEntity<?> obterMovimentacao(
+            @PathVariable("id") String idMovimentacao,
+            @RequestHeader(value = "X-Empresa-Id", required = false) String headerEmpresaId
+    ) {
+        Integer idEmpresa = resolverEmpresaId(headerEmpresaId);
+        if (idEmpresa == null) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "erro", true,
+                    "mensagem", "Não foi possível identificar a empresa para esta requisição"
+            ));
+        }
+        if (!validarAcessoEmpresa(idEmpresa)) {
+            return ResponseEntity.status(403).body(Map.of(
+                    "erro", true,
+                    "mensagem", "Você não tem permissão de acessar esta empresa"
+            ));
+        }
+        if (idMovimentacao == null || idMovimentacao.isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "erro", true,
+                    "mensagem", "Identificador da movimentação é obrigatório"
+            ));
+        }
+        return erpFinanceiroService.buscarMovimentacaoMap(idEmpresa, idMovimentacao)
+                .map(mov -> ResponseEntity.ok(Map.of("erro", false, "movimentacao", mov)))
+                .orElseGet(() -> ResponseEntity.status(404).body(Map.of(
+                        "erro", true,
+                        "mensagem", "Movimentação não encontrada"
+                )));
     }
 
     @PostMapping("/movimentacoes")
@@ -722,6 +757,94 @@ public class ErpFinanceiroController {
         }
         DfcResponseDTO dfc = erpFinanceiroService.gerarDfc(dataInicio, dataTermino, idEmpresa);
         return ResponseEntity.ok(dfc);
+    }
+
+    public record ImportLancamentosPreviewRequest(
+            String csvContent,
+            /** receita | despesa */
+            String tipo
+    ) {}
+
+    public record ImportLancamentosConfirmRequest(
+            String tipo,
+            List<Map<String, Object>> linhas,
+            String categoriaPadrao,
+            String contaPadrao,
+            String formaPagamentoPadrao,
+            String nomeArquivo
+    ) {}
+
+    @PostMapping("/import/lancamentos/preview")
+    @PreAuthorize("hasPermission(null, 'MOVIMENTACOES')")
+    public ResponseEntity<?> previewImportLancamentos(
+            @RequestBody ImportLancamentosPreviewRequest request
+    ) {
+        if (request == null || request.csvContent() == null || request.csvContent().isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "erro", true,
+                    "mensagem", "Conteúdo CSV vazio."
+            ));
+        }
+        String tipo = request.tipo() == null || request.tipo().isBlank() ? "receita" : request.tipo().trim();
+        try {
+            return ResponseEntity.ok(movimentacaoLancamentoImportService.previewCsv(request.csvContent(), tipo));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "erro", true,
+                    "mensagem", "Não foi possível ler a planilha: " + e.getMessage()
+            ));
+        }
+    }
+
+    @PostMapping("/import/lancamentos")
+    @PreAuthorize("hasPermission(null, 'MOVIMENTACOES')")
+    public ResponseEntity<?> confirmarImportLancamentos(
+            @RequestHeader(value = "X-Empresa-Id", required = false) String headerEmpresaId,
+            @RequestBody ImportLancamentosConfirmRequest request
+    ) {
+        Integer idEmpresa = resolverEmpresaId(headerEmpresaId);
+        if (idEmpresa == null) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "erro", true,
+                    "mensagem", "Não foi possível identificar a empresa para esta requisição"
+            ));
+        }
+        if (!validarAcessoEmpresa(idEmpresa)) {
+            return ResponseEntity.status(403).body(Map.of(
+                    "erro", true,
+                    "mensagem", "Você não tem permissão de acessar esta empresa"
+            ));
+        }
+        if (request == null || request.linhas() == null || request.linhas().isEmpty()) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "erro", true,
+                    "mensagem", "Nenhuma linha válida para importar."
+            ));
+        }
+        String tipo = request.tipo() == null || request.tipo().isBlank() ? "receita" : request.tipo().trim();
+        try {
+            Map<String, Object> resultado = movimentacaoLancamentoImportService.importarLinhas(
+                    idEmpresa,
+                    tipo,
+                    request.linhas(),
+                    request.categoriaPadrao(),
+                    request.contaPadrao(),
+                    request.formaPagamentoPadrao(),
+                    request.nomeArquivo()
+            );
+            return ResponseEntity.ok(resultado);
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "erro", true,
+                    "mensagem", e.getMessage()
+            ));
+        } catch (Exception e) {
+            log.error("Falha ao importar lançamentos", e);
+            return ResponseEntity.badRequest().body(Map.of(
+                    "erro", true,
+                    "mensagem", "Falha ao importar lançamentos: " + e.getMessage()
+            ));
+        }
     }
 
     @PostMapping(value = "/import/ofx", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)

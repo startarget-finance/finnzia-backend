@@ -186,6 +186,11 @@ public interface MovimentacaoFinanceiraRepository extends JpaRepository<Moviment
      */
     Optional<MovimentacaoFinanceira> findFirstByIdEmpresaIsNotNullOrderByIdEmpresaAsc();
 
+    List<MovimentacaoFinanceira> findTop200ByIdEmpresaAndIdContaFinanceiraOrderByDataVencimentoDescIdMovimentacaoDesc(
+            Integer idEmpresa,
+            Integer idContaFinanceira
+    );
+
     long countByIdEmpresaAndOfxImportacaoId(Integer idEmpresa, Long ofxImportacaoId);
 
     @Modifying

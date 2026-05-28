@@ -171,9 +171,18 @@ public class PluggyController {
                     "mensagem", msg
             ));
         } catch (IllegalStateException e) {
+            log.error("Pluggy sync falhou (gateway) conexao={}", id, e);
             return ResponseEntity.status(HttpStatus.BAD_GATEWAY).body(Map.of(
                     "erro", true,
                     "mensagem", e.getMessage() != null ? e.getMessage() : "Falha na API Pluggy"
+            ));
+        } catch (Exception e) {
+            log.error("Pluggy sync falhou (inesperado) conexao={}", id, e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of(
+                    "erro", true,
+                    "mensagem", e.getMessage() != null && !e.getMessage().isBlank()
+                            ? e.getMessage()
+                            : "Erro interno ao sincronizar. Veja os logs do backend."
             ));
         }
     }

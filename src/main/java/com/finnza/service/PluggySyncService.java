@@ -97,7 +97,11 @@ public class PluggySyncService {
 
         String from = ini.toString();
         String to = fim.toString();
+        long t0 = System.currentTimeMillis();
         log.info("Pluggy sync: item={} empresa={} período {} a {} ({} dias)", itemId, idEmpresa, from, to, diasPeriodo);
+
+        OfxImportService.PluggyClassificacaoContexto classificacaoCtx =
+                ofxImportService.criarContextoClassificacaoPluggy(idEmpresa);
 
         List<MovimentacaoFinanceira> candidatos = new ArrayList<>();
         for (JsonNode acc : results) {
@@ -108,7 +112,8 @@ public class PluggySyncService {
             String accountLabel = accountLabel(acc);
             List<JsonNode> txs = fetchAllTransactions(apiKey, accountId, from, to);
             for (JsonNode tx : txs) {
-                MovimentacaoFinanceira m = mapTransaction(idEmpresa, itemId, accountLabel, idConta, nomeContaPref, tx);
+                MovimentacaoFinanceira m = mapTransaction(
+                        idEmpresa, itemId, accountLabel, idConta, nomeContaPref, tx, classificacaoCtx);
                 if (m != null) {
                     candidatos.add(m);
                 }
@@ -116,8 +121,7 @@ public class PluggySyncService {
         }
 
         List<String> ids = candidatos.stream().map(MovimentacaoFinanceira::getIdMovimentacao).filter(Objects::nonNull).distinct().toList();
-        Set<String> existentes = new HashSet<>(
-                movimentacaoRepo.findAllById(ids).stream().map(MovimentacaoFinanceira::getIdMovimentacao).collect(Collectors.toSet()));
+        Set<String> existentes = carregarIdsMovimentacaoExistentes(ids);
 
         List<MovimentacaoFinanceira> novos = candidatos.stream()
                 .filter(m -> m.getIdMovimentacao() != null && !existentes.contains(m.getIdMovimentacao()))
@@ -162,6 +166,17 @@ public class PluggySyncService {
             // Classificação já aplicada em mapTransaction; backfill síncrono estourava timeout no Render.
         }
 
+        log.info(
+                "Pluggy sync OK: item={} empresa={} candidatos={} novos={} duplicadas={} importacaoId={} em {} ms",
+                itemId,
+                idEmpresa,
+                candidatos.size(),
+                novos.size(),
+                Math.max(0, candidatos.size() - novos.size()),
+                importacao.getId(),
+                System.currentTimeMillis() - t0
+        );
+
         return PluggySyncResponse.builder()
                 .totalPluggy(candidatos.size())
                 .importadas(novos.size())
@@ -171,6 +186,22 @@ public class PluggySyncService {
                 .periodoInicio(min)
                 .periodoFim(max)
                 .build();
+    }
+
+    private Set<String> carregarIdsMovimentacaoExistentes(List<String> ids) {
+        if (ids == null || ids.isEmpty()) {
+            return Set.of();
+        }
+        Set<String> existentes = new HashSet<>();
+        final int lote = 400;
+        for (int i = 0; i < ids.size(); i += lote) {
+            List<String> slice = ids.subList(i, Math.min(i + lote, ids.size()));
+            movimentacaoRepo.findAllById(slice).stream()
+                    .map(MovimentacaoFinanceira::getIdMovimentacao)
+                    .filter(Objects::nonNull)
+                    .forEach(existentes::add);
+        }
+        return existentes;
     }
 
     private List<JsonNode> fetchAllTransactions(String apiKey, String accountId, String from, String to) {
@@ -210,7 +241,8 @@ public class PluggySyncService {
             String accountLabel,
             Integer idConta,
             String nomeContaPref,
-            JsonNode tx
+            JsonNode tx,
+            OfxImportService.PluggyClassificacaoContexto classificacaoCtx
     ) {
         if (!tx.hasNonNull("id")) {
             return null;
@@ -283,7 +315,7 @@ public class PluggySyncService {
                 .ofxAprovado(false)
                 .build();
 
-        ofxImportService.aplicarClassificacaoOpenFinancePluggy(mov, idEmpresa, textNode(tx, "category"));
+        ofxImportService.aplicarClassificacaoOpenFinancePluggy(mov, idEmpresa, textNode(tx, "category"), classificacaoCtx);
         return mov;
     }
 

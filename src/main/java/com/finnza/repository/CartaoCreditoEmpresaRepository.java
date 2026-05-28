@@ -12,4 +12,6 @@ public interface CartaoCreditoEmpresaRepository extends JpaRepository<CartaoCred
     List<CartaoCreditoEmpresa> findByIdEmpresaAndAtivoTrueOrderByNomeAsc(Integer idEmpresa);
 
     Optional<CartaoCreditoEmpresa> findByIdAndIdEmpresa(Long id, Integer idEmpresa);
+
+    Optional<CartaoCreditoEmpresa> findByIdAndIdEmpresaAndAtivoTrue(Long id, Integer idEmpresa);
 }

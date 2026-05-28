@@ -1,0 +1,77 @@
+CREATE TABLE IF NOT EXISTS catalogo_instituicao_financeira (
+    id BIGSERIAL PRIMARY KEY,
+    codigo VARCHAR(20),
+    banco VARCHAR(120) NOT NULL,
+    instituicao VARCHAR(255) NOT NULL,
+    grupo VARCHAR(80) NOT NULL,
+    popular BOOLEAN NOT NULL DEFAULT FALSE,
+    ordem INTEGER NOT NULL DEFAULT 0,
+    ativo BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_cat_if_ativo_grupo
+    ON catalogo_instituicao_financeira (ativo, grupo, popular, ordem, banco);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uk_cat_if_codigo
+    ON catalogo_instituicao_financeira (codigo)
+    WHERE codigo IS NOT NULL;
+
+INSERT INTO catalogo_instituicao_financeira (codigo, banco, instituicao, grupo, popular, ordem) VALUES
+('001', 'Banco do Brasil', 'Banco do Brasil S.A.', 'Bancos tradicionais', TRUE, 10),
+('104', 'Caixa', 'Caixa Econômica Federal', 'Bancos tradicionais', TRUE, 20),
+('237', 'Bradesco', 'Banco Bradesco S.A.', 'Bancos tradicionais', TRUE, 30),
+('341', 'Itaú', 'Itaú Unibanco S.A.', 'Bancos tradicionais', TRUE, 40),
+('033', 'Santander', 'Banco Santander (Brasil) S.A.', 'Bancos tradicionais', TRUE, 50),
+('422', 'Safra', 'Banco Safra S.A.', 'Bancos tradicionais', TRUE, 60),
+('745', 'Citibank', 'Banco Citibank S.A.', 'Bancos tradicionais', FALSE, 70),
+('756', 'Sicoob', 'Banco Cooperativo do Brasil S.A. (Sicoob)', 'Cooperativas', FALSE, 80),
+('748', 'Sicredi', 'Banco Cooperativo Sicredi S.A.', 'Cooperativas', FALSE, 90),
+('085', 'Ailos', 'Cooperativa Central de Crédito Ailos', 'Cooperativas', FALSE, 100),
+('246', 'ABC Brasil', 'Banco ABC Brasil S.A.', 'Bancos tradicionais', FALSE, 110),
+('389', 'Mercantil', 'Banco Mercantil do Brasil S.A.', 'Bancos tradicionais', FALSE, 120),
+('077', 'Inter', 'Banco Inter S.A.', 'Bancos digitais', TRUE, 130),
+('260', 'Nubank', 'Nu Pagamentos S.A. (Nubank)', 'Bancos digitais', TRUE, 140),
+('336', 'C6 Bank', 'Banco C6 S.A.', 'Bancos digitais', TRUE, 150),
+('290', 'PagBank', 'PagSeguro Internet S.A. (PagBank)', 'Bancos digitais', TRUE, 160),
+('323', 'Mercado Pago', 'Mercado Pago Instituição de Pagamento Ltda.', 'Bancos digitais', TRUE, 170),
+('380', 'PicPay', 'PicPay Instituição de Pagamento S.A.', 'Bancos digitais', TRUE, 180),
+('739', 'Omni', 'Omni Banco S.A.', 'Bancos digitais', FALSE, 190),
+('654', 'Neon', 'Banco Votorantim S.A. (Neon)', 'Bancos digitais', FALSE, 200),
+('212', 'Original', 'Banco Original S.A.', 'Bancos digitais', FALSE, 210),
+('655', 'Votorantim', 'Banco Votorantim S.A.', 'Bancos tradicionais', FALSE, 220),
+('746', 'Modal', 'Banco Modal S.A.', 'Bancos digitais', FALSE, 230),
+('208', 'BTG Pactual', 'Banco BTG Pactual S.A.', 'Bancos de investimento', TRUE, 240),
+('473', 'Banco Caixa Geral', 'Banco Caixa Geral - Brasil S.A.', 'Bancos tradicionais', FALSE, 250),
+('041', 'Banrisul', 'Banco do Estado do Rio Grande do Sul S.A.', 'Bancos estaduais', FALSE, 260),
+('047', 'Banese', 'Banco do Estado de Sergipe S.A.', 'Bancos estaduais', FALSE, 270),
+('070', 'BRB', 'Banco de Brasília S.A.', 'Bancos estaduais', FALSE, 280),
+('004', 'BNB', 'Banco do Nordeste do Brasil S.A.', 'Bancos públicos', FALSE, 290),
+('021', 'Banestes', 'Banco do Estado do Espírito Santo S.A.', 'Bancos estaduais', FALSE, 300),
+('037', 'Banpará', 'Banco do Estado do Pará S.A.', 'Bancos estaduais', FALSE, 310),
+('623', 'Pan', 'Banco Pan S.A.', 'Bancos tradicionais', FALSE, 320),
+('707', 'Daycoval', 'Banco Daycoval S.A.', 'Bancos tradicionais', FALSE, 330),
+('633', 'Rendimento', 'Banco Rendimento S.A.', 'Bancos tradicionais', FALSE, 340),
+('082', 'Topázio', 'Banco Topázio S.A.', 'Bancos digitais', FALSE, 360),
+('124', 'Agibank', 'Banco Agibank S.A.', 'Bancos digitais', FALSE, 370),
+('318', 'BMG', 'Banco BMG S.A.', 'Bancos tradicionais', FALSE, 380),
+('634', 'Triângulo', 'Banco Triângulo S.A.', 'Bancos tradicionais', FALSE, 390),
+('121', 'Ari', 'Banco Ari S.A.', 'Bancos de investimento', FALSE, 400),
+('125', 'Plural', 'Banco Plural S.A.', 'Bancos de investimento', FALSE, 410),
+('243', 'Master', 'Banco Master S.A.', 'Bancos de investimento', FALSE, 420),
+('249', 'Investcred', 'Banco Investcred Unibanco S.A.', 'Bancos de investimento', FALSE, 430),
+('652', 'Itaú Unibanco Holding', 'Itaú Unibanco S.A. (Holding)', 'Bancos tradicionais', FALSE, 440),
+('735', 'Neon Pagamentos', 'Neon Pagamentos S.A.', 'Instituições de pagamento', FALSE, 450),
+('461', 'Asaas', 'Asaas Gestão Financeira Instituição de Pagamento S.A.', 'Instituições de pagamento', FALSE, 460),
+('332', 'Acesso', 'Acesso Soluções de Pagamento S.A.', 'Instituições de pagamento', FALSE, 470),
+('197', 'Stone', 'Stone Instituição de Pagamento S.A.', 'Instituições de pagamento', FALSE, 480),
+('629', 'Hipercard', 'Hipercard Banco Múltiplo S.A.', 'Bancos tradicionais', FALSE, 490),
+('399', 'HSBC Brasil', 'HSBC Bank Brasil S.A. - Banco Múltiplo', 'Bancos tradicionais', FALSE, 500),
+('655', 'BV', 'Banco BV S.A.', 'Bancos tradicionais', FALSE, 510),
+('741', 'Ribeirão Preto', 'Banco Ribeirão Preto S.A.', 'Bancos tradicionais', FALSE, 520),
+('611', 'Paulista', 'Banco Paulista S.A.', 'Bancos tradicionais', FALSE, 530),
+('612', 'Guanabara', 'Banco Guanabara S.A.', 'Bancos tradicionais', FALSE, 540),
+('643', 'Pine', 'Banco Pine S.A.', 'Bancos tradicionais', FALSE, 550),
+('999', 'Outro banco', 'Outra instituição financeira (manual)', 'Outros', FALSE, 9999)
+ON CONFLICT DO NOTHING;

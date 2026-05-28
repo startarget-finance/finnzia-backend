@@ -475,6 +475,10 @@ public class ErpFinanceiroService {
         return movimentacaoRepo.findByIdMovimentacaoAndIdEmpresa(idMovimentacao, idEmpresa);
     }
 
+    public Optional<Map<String, Object>> buscarMovimentacaoMap(Integer idEmpresa, String idMovimentacao) {
+        return buscarMovimentacao(idEmpresa, idMovimentacao).map(this::entityToMap);
+    }
+
     /**
      * Busca movimentações no banco local no formato esperado pelo frontend.
      * orderBy: "data" | "valor" | "status" | "tipo" (campo da entidade: dataVencimento, valor, statusPagamento, debito)

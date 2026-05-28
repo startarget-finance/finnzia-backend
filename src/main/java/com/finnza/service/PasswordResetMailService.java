@@ -197,7 +197,7 @@ public class PasswordResetMailService {
     }
 
     private boolean useResend() {
-        return "resend".equalsIgnoreCase(StringUtils.trimWhitespace(mailProvider));
+        return mailProvider != null && "resend".equalsIgnoreCase(mailProvider.strip());
     }
 
     private boolean smtpReady() {

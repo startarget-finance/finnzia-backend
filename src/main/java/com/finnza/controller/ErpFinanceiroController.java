@@ -39,6 +39,10 @@ import java.util.Map;
 @RequiredArgsConstructor
 public class ErpFinanceiroController {
 
+    /** Leitura de movimentações/resumo: relatório e dashboard não exigem permissão de edição. */
+    private static final String PODE_LER_FINANCEIRO =
+            "hasPermission(null, 'MOVIMENTACOES') or hasPermission(null, 'RELATORIO') or hasPermission(null, 'DASHBOARD')";
+
     public record CriarMovimentacaoRequest(
             Boolean debito,
             String dataVencimento,
@@ -191,7 +195,7 @@ public class ErpFinanceiroController {
     }
 
     @GetMapping("/movimentacoes")
-    @PreAuthorize("hasPermission(null, 'MOVIMENTACOES')")
+    @PreAuthorize(PODE_LER_FINANCEIRO)
     public ResponseEntity<?> buscarMovimentacoes(
             @RequestHeader(value = "X-Empresa-Id", required = false) String headerEmpresaId,
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate dataInicio,
@@ -199,6 +203,8 @@ public class ErpFinanceiroController {
             @RequestParam(required = false) String tipoData,
             @RequestParam(required = false) String tipo,
             @RequestParam(required = false) String statusPagamento,
+            @RequestParam(required = false) String buscaFornecedor,
+            @RequestParam(required = false) String buscaCategoria,
             @RequestParam(required = false, defaultValue = "data") String orderBy,
             @RequestParam(required = false, defaultValue = "asc") String orderDirection,
             @RequestParam(required = false, defaultValue = "50") Integer itensPorPagina,
@@ -253,6 +259,8 @@ public class ErpFinanceiroController {
                         idEmpresa,
                         debitoFiltro,
                         statusPagamento,
+                        buscaFornecedor,
+                        buscaCategoria,
                         orderBy,
                         orderDirection,
                         itensPorPagina,
@@ -703,7 +711,7 @@ public class ErpFinanceiroController {
     }
 
     @GetMapping("/resumo-financeiro")
-    @PreAuthorize("hasPermission(null, 'MOVIMENTACOES')")
+    @PreAuthorize(PODE_LER_FINANCEIRO)
     public ResponseEntity<?> obterResumoFinanceiro(
             @RequestHeader(value = "X-Empresa-Id", required = false) String headerEmpresaId,
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate dataInicio,

@@ -490,11 +490,21 @@ public class ErpFinanceiroService {
             Integer idEmpresa,
             Boolean debito,           // null = todos; true = despesas; false = receitas
             String statusPagamento,   // null | "pendente" | "pago"
+            String buscaFornecedor,
+            String buscaCategoria,
             String orderBy,
             String orderDirection,
             int itensPorPagina,
             int numeroDaPagina
     ) {
+        String termoFornecedor = buscaFornecedor != null ? buscaFornecedor.trim() : "";
+        if (termoFornecedor.isEmpty()) {
+            termoFornecedor = null;
+        }
+        String termoCategoria = buscaCategoria != null ? buscaCategoria.trim() : "";
+        if (termoCategoria.isEmpty()) {
+            termoCategoria = null;
+        }
         String sortField = "dataVencimento";
         if (orderBy != null && !orderBy.isBlank()) {
             switch (orderBy.trim().toLowerCase()) {
@@ -524,6 +534,9 @@ public class ErpFinanceiroService {
             if (useCompetencia) {
                 page = movimentacaoRepo.findByIdEmpresaAndDebitoAndDataCompetenciaBetween(
                         idEmpresa, debito, dataInicio, dataTermino, pageable);
+            } else if (Boolean.TRUE.equals(debito) && (termoFornecedor != null || termoCategoria != null)) {
+                page = movimentacaoRepo.findByIdEmpresaAndDebitoAndDataVencimentoBetweenWithTextoFiltros(
+                        idEmpresa, debito, dataInicio, dataTermino, termoFornecedor, termoCategoria, pageable);
             } else {
                 page = movimentacaoRepo.findByIdEmpresaAndDebitoAndDataVencimentoBetween(
                         idEmpresa, debito, dataInicio, dataTermino, pageable);

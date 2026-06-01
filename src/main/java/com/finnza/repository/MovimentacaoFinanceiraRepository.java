@@ -51,6 +51,30 @@ public interface MovimentacaoFinanceiraRepository extends JpaRepository<Moviment
             SELECT m FROM MovimentacaoFinanceira m
             WHERE m.idEmpresa = :idEmpresa
               AND m.debito = :debito
+              AND m.dataVencimento BETWEEN :dataInicio AND :dataTermino
+              AND (m.ofxAprovado IS NULL OR m.ofxAprovado = true)
+              AND (
+                :termoFornecedor IS NULL OR :termoFornecedor = '' OR
+                LOWER(COALESCE(m.nomeClienteFornecedor, '')) LIKE LOWER(CONCAT('%', :termoFornecedor, '%'))
+              )
+              AND (
+                :termoCategoria IS NULL OR :termoCategoria = '' OR
+                LOWER(COALESCE(m.nomeCategoriaFinanceira, '')) LIKE LOWER(CONCAT('%', :termoCategoria, '%'))
+              )
+            """)
+    Page<MovimentacaoFinanceira> findByIdEmpresaAndDebitoAndDataVencimentoBetweenWithTextoFiltros(
+            @Param("idEmpresa") Integer idEmpresa,
+            @Param("debito") Boolean debito,
+            @Param("dataInicio") LocalDate dataInicio,
+            @Param("dataTermino") LocalDate dataTermino,
+            @Param("termoFornecedor") String termoFornecedor,
+            @Param("termoCategoria") String termoCategoria,
+            Pageable pageable);
+
+    @Query("""
+            SELECT m FROM MovimentacaoFinanceira m
+            WHERE m.idEmpresa = :idEmpresa
+              AND m.debito = :debito
               AND m.statusPagamento = :statusPagamento
               AND m.dataVencimento BETWEEN :dataInicio AND :dataTermino
               AND (m.ofxAprovado IS NULL OR m.ofxAprovado = true)

@@ -918,13 +918,14 @@ public class FaturaCartaoService {
             if (!Boolean.TRUE.equals(item.get("salvarRegra"))) {
                 continue;
             }
-            String texto = sanitize(item.get("textoRegra"));
-            if (texto == null) {
-                texto = sanitize(item.get("descricao"));
-                if (texto != null && texto.length() > 48) {
-                    texto = texto.substring(0, 48).trim();
+            String textoRegra = sanitize(item.get("textoRegra"));
+            if (textoRegra == null) {
+                textoRegra = sanitize(item.get("descricao"));
+                if (textoRegra != null && textoRegra.length() > 48) {
+                    textoRegra = textoRegra.substring(0, 48).trim();
                 }
             }
+            final String texto = textoRegra;
             String categoria = normalizarCategoriaImportada(String.valueOf(item.getOrDefault("categoria", "")));
             if (texto == null || texto.length() < 3 || CATEGORIA_A_CLASSIFICAR.equalsIgnoreCase(categoria)) {
                 continue;
